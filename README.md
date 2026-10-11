@@ -486,8 +486,10 @@ workflow starts from freshly bound tagged surfaces and actual surface checks
 on the same commit. The current recipe authors one common approximately
 isotropic padded background grid for both components (largest extent divided
 by 44), source-derived interior seeds verified by three nondegenerate rays,
-feature extraction and fixed level-2 surface refinement. Snapping and boundary
-layers are disabled for this explicitly staircase approximation. Wall resolution and convergence
+feature extraction and uniform level-2 volume refinement. The distance target
+is 1.01 times the common background diagonal; actual selected cell levels must
+independently prove that the native refinement reached level 2. Snapping and
+boundary layers are disabled for this explicitly staircase approximation. Wall resolution and convergence
 remain unqualified. One source coordinate unit equals one metre by declared
 classroom assumption only. Original volume meshes remain unchanged.
 
@@ -499,6 +501,16 @@ geometry, full `checkMesh -allGeometry -allTopology -writeSets`, and unchanged
 native interface coverage are required. Pre-merge raw meshes are retained as
 immutable snapshots. Native patch area, bounds and enclosed-volume comparisons
 are measured independently and labelled as approximation diagnostics.
+
+Before authoring cell zones, native `splitMeshRegions -insidePoint -overwrite`
+selects only the region containing the measured source interior seed. The
+pre-selection primitive mesh and native point/cell/signed-face maps are retained
+and independently replayed. Selected positive cell volume must be at least
+99.9% of the generated positive volume; all eleven source physical patches
+remain mandatory. Removal of disconnected generated fragments is a declared
+derived-mesh operation, not a change to source surfaces or a quality waiver.
+Only an optional empty background patch may disappear. The complete recipe has
+15 ordered native geometry stages and keeps all full mesh checks unchanged.
 
 This pilot invokes geometry utilities only. It does not invoke `foamRun` or
 admit geometry accuracy, a steady MRF solution, pressure-sweep NPSHr, physical
@@ -515,6 +527,16 @@ no flow solver ran. The common-grid castellated-only recipe is a distinct
 bounded trial, not a reclassification of that failed mesh. Smooth-wall geometry
 accuracy, passage fidelity and physical pump performance remain unqualified
 even if its subsequent native quality/interface checks pass.
+
+The next common-grid, unsnapped run
+[38174426218](https://github.com/simcalc/PyAnsys/actions/runs/38174426218)
+generated **76,083 impeller cells**, but the native check still rejected
+**8 isolated zero-determinant cells** and **3,062 concave-cell checks**.
+The pinned native implementation checks concave or planar cell faces, so that
+count does not by itself identify every geometric cause. Its raw mesh, actual
+failed-cell sets and native logs are retained. No volute, coupled mesh or flow
+solver acceptance follows from that failed impeller. Uniform volume refinement
+and source-seed region selection are a new bounded trial; success is unproven.
 
 ### Independent exploratory MRF lane for an admitted approximate mesh
 

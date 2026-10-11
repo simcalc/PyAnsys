@@ -32,7 +32,7 @@ SOURCE_REPORT_KEYS = {"schemaVersion", "githubRepository", "githubRunId", "githu
     "nativeCoordinateUnitsVerified", "nativeNodeIdentityEquivalent", "classroomMetresPerSourceCoordinateUnit",
     "meshConvergenceVerified", "numericalBaselineQualified", "qualifiedBaseline", "npsh3Qualified", "simulationExecuted",
     "actualCfdRunVerified", "mainApplicationWrites", "claimBoundary", "runtimeIdentityFile", "mergedNativeMeshEvidence",
-    "retainedNativeLogRecords", "workspaceBytes", "elapsedSeconds"}
+    "retainedNativeLogRecords", "workspaceBytes", "elapsedSeconds", "regionSelectionEvidence"}
 FALSE_FLAGS = ("nativeCoordinateUnitsVerified", "nativeNodeIdentityEquivalent", "originalPolygonGeometryVerified",
     "geometricApproximationQualified", "geometryAccuracyQualified", "wallResolutionQualified", "meshConvergenceVerified",
     "nativeCaseGenerated", "qualifiedBaseline", "npsh3Qualified", "simulationExecuted", "actualCfdRunVerified",
@@ -85,8 +85,9 @@ def validate_runtime(value):
         and value["officialDebSha256"] == geometry.surface.PACKAGE_SHA and value["expectedSourceCommit"] == mesher.SOURCE_COMMIT
         and value["mainApplicationWrites"] is False, "Require the exact actually used Foundation-12 geometry runtime.")
     rows = value["binaries"]
-    require(isinstance(rows, list) and len(rows) == 7 and [row.get("program") for row in rows] == list(geometry.PROGRAMS),
-        "All seven actual source geometry programs must remain ordered and bound.")
+    require(isinstance(rows, list) and len(rows) == len(geometry.PROGRAMS)
+        and [row.get("program") for row in rows] == list(geometry.PROGRAMS),
+        "All actual source geometry programs must remain ordered and bound.")
     for row in rows:
         require(set(row) == {"program", "path", "bytes", "sha256", "packageOwnership"}
             and isinstance(row["bytes"], int) and not isinstance(row["bytes"], bool) and 0 < row["bytes"] <= mesher.MAX_FILE_BYTES
@@ -108,11 +109,13 @@ def source_preparation(root, command_root):
     mesher.utc_timestamp(report["createdAt"])
     require(report["classroomAssumptions"] == mesher.CLASSROOM_ASSUMPTIONS and report["limits"] == mesher.LIMITS
         and report["requiredAcceptance"] == mesher.REQUIRED_ACCEPTANCE and report["claimBoundary"] == mesher.CLAIM
-        and report["references"] == mesher.REFERENCES and report["nativeCommandArguments"] == mesher.commands(command_root),
+        and report["references"] == mesher.REFERENCES,
         "Preserve exact source geometry controls, bounds and historical command provenance.")
     union = mesher.union.verify_output(root / "source-surface")
     proof = mesher.verify_surface_proof(root / "source-surface-check", root / "source-surface", union)
     components, authored = mesher.make_components(root / "source-surface", union)
+    require(report["nativeCommandArguments"] == mesher.commands(command_root, components),
+        "Bind historical native commands to the independently regenerated source inside points.")
     payloads = mesher.source_union_payloads(root / "source-surface")
     expected = {"authoredFileRecords": [mesher.union.file_row(p, b) for p, b in sorted(authored.items())],
         "sourceSurfaceFileRecords": [mesher.union.file_row("source-surface/" + p, b) for p, b in sorted(payloads.items())],
@@ -155,13 +158,15 @@ def validate_inputs(directory, *, command_root=None):
     require(report["runtimeIdentityFile"] == runtime_row, "Actual source runtime bytes changed.")
     validate_runtime(mesher.union.read_json(runtime_raw))
     stages = report["stages"]
-    require(isinstance(stages, list) and len(stages) == 13, "Every actual geometry stage must be complete.")
+    source_commands = geometry.commands(command_root, prepared["components"])
+    require(isinstance(stages, list) and len(stages) == len(source_commands), "Every actual geometry stage must be complete.")
     logs = []
     texts = {}
-    for i, (stage, args) in enumerate(zip(stages, geometry.commands(command_root))):
+    for i, (stage, args) in enumerate(zip(stages, source_commands)):
         path = f"logs/{i:02d}-{args[0]}.log"
         raw, row = read(root, path, geometry.MAX_LOG)
         require(set(stage) == {"stageIndex", "program", "arguments", "exitCode", "elapsedSeconds", "logFile"}
+            and type(stage["stageIndex"]) is int and type(stage["exitCode"]) is int
             and stage["stageIndex"] == i and stage["program"] == args[0] and stage["arguments"] == args and stage["exitCode"] == 0
             and stage["logFile"] == row and isinstance(stage["elapsedSeconds"], (int, float))
             and not isinstance(stage["elapsedSeconds"], bool) and math.isfinite(stage["elapsedSeconds"])
@@ -170,22 +175,42 @@ def validate_inputs(directory, *, command_root=None):
         geometry.completed_log(text)
         logs.append(row); texts[i] = text
     require(report["retainedNativeLogRecords"] == logs, "Every complete source native log remains immutable and bound.")
-    measured, components, snapshots = [], [], []
+    measured, components, snapshots, selections = [], [], [], []
     require(isinstance(report["components"], list) and len(report["components"]) == 2, "Require both actual component inventories.")
+    component_quality_indices = [i for i, args in enumerate(source_commands)
+        if args[0] == "checkMesh"][0:-1]
+    merged_quality_index = len(source_commands) - 1
+    require(len(component_quality_indices) == 2 and source_commands[merged_quality_index][0] == "checkMesh",
+        "Require two ordered component quality checks and the final merged native quality check.")
     for i, expected in enumerate(prepared["components"]):
-        name, index = expected["component"], 4 + 5 * i
+        name, index = expected["component"], component_quality_indices[i]
         old = report["components"][i]
+        split_indices = [stage_index for stage_index, args in enumerate(source_commands)
+            if args[0] == "splitMeshRegions" and args[2] == str(Path(command_root).absolute() / expected["caseDirectory"])]
+        require(len(split_indices) == 1 and split_indices[0] < index,
+            "Require one actual measured-seed region selection before each component quality check.")
+        selection = geometry.verify_region_selection(root, expected, texts[split_indices[0]], command_root=command_root)
+        selections.append(selection)
         actual = geometry.native_mesh(root / "component-mesh-snapshots" / name, [expected], texts[index])
         actual["caseDirectory"] = name + "-case"
         actual["nativeFiles"] = [{**row, "path": name + "-case/constant/polyMesh/" + Path(row["path"]).name} for row in actual["nativeFiles"]]
         rows = [read(root, f"component-mesh-snapshots/{name}/constant/polyMesh/{file}")[1] for file in MESH_NAMES]
-        actual.update(nativeMeshSnapshotRecords=rows, nativeFilesMeasuredAtStageIndex=index, nativeFilesImmutableAfterMerge=False)
+        selected_files = {Path(row["path"]).name: row for row in selection["selectedNativeFileRecords"]}
+        snapshot_files = {Path(row["path"]).name: row for row in rows}
+        require(set(selected_files) == set(geometry.SELECTION_FILES)
+            and all(snapshot_files[file]["bytes"] == selected_files[file]["bytes"]
+                and snapshot_files[file]["sha256"] == selected_files[file]["sha256"] for file in geometry.SELECTION_FILES),
+            "Checked premerge snapshots must retain every exact selected native primitive; topoSet may only add the cell zone.")
+        actual.update(nativeMeshSnapshotRecords=rows, nativeFilesMeasuredAtStageIndex=index,
+            nativeFilesImmutableAfterMerge=False, regionSelectionEvidence=selection)
         require(actual == old, "Recomputed premerge native topology, quality, tags, zones, counts and snapshot bytes must match the actual geometry evidence.")
         measured.append(actual); snapshots.extend(rows)
         components.append({key: actual[key] for key in ("component", "caseDirectory", "nodeCount", "cellCount", "faceCount", "internalFaceCount", "patchFaces", "cellZone", "patchTypes")})
+    require(report["regionSelectionEvidence"] == selections,
+        "Both ordered source native region-selection packets must independently replay from their actual maps and immutable primitives.")
     require(sum(row["cellCount"] for row in components) < geometry.MAX_COMBINED_CELLS
         and sum(row["nodeCount"] for row in components) < geometry.MAX_COMBINED_POINTS, "Admit only the measured lighter combined geometry budget.")
-    merged = geometry.native_mesh(root / "impeller-case", measured, texts[12])
+    merged = geometry.native_mesh(root / "impeller-case", measured, texts[merged_quality_index])
     require(merged == report["mergedNativeMeshEvidence"] and merged["cellCount"] == sum(row["cellCount"] for row in components)
         and merged["nodeCount"] == sum(row["nodeCount"] for row in components)
         and merged["nativeQuality"]["polyMeshConnectedRegionCount"] == 2, "The actual merged source mesh must retain both separate NCC-coupled fluid components.")
@@ -197,6 +222,7 @@ def validate_inputs(directory, *, command_root=None):
     names.update(row["path"] for row in snapshots)
     names.update(row["path"] for row in merged["nativeFiles"])
     names.update(row["path"] for row in logs)
+    names.update(row["path"] for selection in selections for row in geometry.selection_file_records(selection))
     payloads = {path: read(root, path, geometry.MAX_LOG if path.endswith(".log") else mesher.MAX_FILE_BYTES)[0] for path in sorted(names)}
     require(sum(map(len, payloads.values())) <= MAX_WORKSPACE, "Source geometry evidence exceeds the isolated transfer budget.")
     return {"report": report, "reportFile": read(root, "snappy-execution.json", mesher.MAX_REPORT_BYTES)[1],
@@ -204,8 +230,9 @@ def validate_inputs(directory, *, command_root=None):
         "sourceDirectory": root, "commandRoot": command_root}
 
 
-def case_files(component, pressure_reference_absolute_pa=300000):
+def case_files(component, pressure_reference_absolute_pa=300000, *, background_box=True):
     require(component in ("impeller", "volute"), "Use the two fixed source component identities.")
+    require(isinstance(background_box, bool), "Declare actual presence of the empty background-box placeholder.")
     pressure = original.pressure_reference(pressure_reference_absolute_pa)
     require(pressure == 300000, "This first classroom baseline declares exactly 300000 Pa before execution.")
     result = original.case_files(component, pressure)
@@ -214,7 +241,31 @@ def case_files(component, pressure_reference_absolute_pa=300000):
         # This lane instead explicitly assigns only snappy's empty backgroundBox.
         result[path] = result[path].replace('"defaultFaces"', '"backgroundBox"')
         require(result[path].count('"backgroundBox"') == 1, "Assign each authored field's empty backgroundBox exactly once.")
+        if not background_box:
+            result[path], count = re.subn(r'    "backgroundBox"\s*\{[^{}]*\}\s*', "", result[path])
+            require(count == 1 and "backgroundBox" not in result[path], "Omit only the absent empty background-box field patch.")
     return {path: raw.encode("ascii") for path, raw in result.items()}
+
+
+def authored_case_files(source, components):
+    """Bind the optional empty placeholder to actual uncoupled snapshot patches."""
+    backgrounds = {}
+    for component in components:
+        name = component["component"]
+        patches = geometry.boundary_entries(source / "component-mesh-snapshots" / name / "constant/polyMesh/boundary")
+        background = patches.get("backgroundBox")
+        require(background is None or (background["type"] == "patch" and background["nFaces"] == 0),
+            "An optional backgroundBox must be an actual zero-face patch in the immutable source snapshot.")
+        backgrounds[name] = background is not None
+    result = {}
+    for component in components:
+        name, folder = component["component"], component["caseDirectory"]
+        # The master field already carries both components' physical BCs.
+        # Its empty placeholder is needed only if either input mesh has one.
+        include_background = any(backgrounds.values()) if name == "impeller" else backgrounds[name]
+        result.update({folder + "/" + p: raw for p, raw in
+            case_files(name, background_box=include_background).items()})
+    return result
 
 
 def commands(output):
@@ -366,10 +417,9 @@ def prepare(snappy_execution_directory, output_directory, pressure_reference_abs
     require(not output.exists() and not output.is_relative_to(source) and not source.is_relative_to(output),
         "Use a fresh independent RUNNER_TEMP physics output directory.")
     verified = validate_inputs(source)
-    authored, initial_meshes = {}, {}
+    authored, initial_meshes = authored_case_files(source, verified["components"]), {}
     for component in verified["components"]:
         name, folder = component["component"], component["caseDirectory"]
-        authored.update({folder + "/" + p: raw for p, raw in case_files(name).items()})
         for filename in MESH_NAMES:
             initial_meshes[folder + "/constant/polyMesh/" + filename] = verified["payloads"][f"component-mesh-snapshots/{name}/constant/polyMesh/{filename}"]
     source_payloads = {"source-snappy/" + p: raw for p, raw in verified["payloads"].items()}
@@ -438,10 +488,9 @@ def verify_output(directory, *, after_native_ncc=False):
     require(report["sourceEvidenceFileRecords"] == expected_source
         and report["sourceComponentFiles"] == [{**row, "path": "source-snappy/" + row["path"]} for row in source["snapshots"]],
         "Every exact retained source byte and premerge snapshot must remain independently verified.")
-    authored, initial = {}, {}
+    authored, initial = authored_case_files(root / "source-snappy", source["components"]), {}
     for component in source["components"]:
         name, folder = component["component"], component["caseDirectory"]
-        authored.update({folder + "/" + p: raw for p, raw in case_files(name).items()})
         initial.update({folder + "/constant/polyMesh/" + p: source["payloads"][f"component-mesh-snapshots/{name}/constant/polyMesh/{p}"] for p in MESH_NAMES})
     require(report["authoredInputFiles"] == [mesher.union.file_row(p, raw) for p, raw in sorted(authored.items())]
         and report["initialCaseMeshFiles"] == [mesher.union.file_row(p, raw) for p, raw in sorted(initial.items())],

@@ -35,6 +35,8 @@ SOURCE_BASE = f"https://github.com/OpenFOAM/OpenFOAM-12/blob/{SOURCE_COMMIT}/"
 REFERENCES = ["https://doc.cfd.direct/openfoam/user-guide-v12/snappyhexmesh",
               SOURCE_BASE + "etc/caseDicts/mesh/generation/snappyHexMeshDict.cfg",
               SOURCE_BASE + "etc/caseDicts/surface/surfaceFeaturesDict",
+              SOURCE_BASE + "applications/utilities/mesh/manipulation/splitMeshRegions/splitMeshRegions.C",
+              SOURCE_BASE + "src/meshCheck/primitiveMeshCheck/primitiveMeshCheck.C",
               SOURCE_BASE + "applications/utilities/mesh/manipulation/topoSet/topoSet.C",
               SOURCE_BASE + "applications/utilities/mesh/manipulation/createNonConformalCouples/createNonConformalCouples.C"]
 FALSE_FLAGS = ("commandExecutionPerformedByThisTool", "nativeCoordinateUnitsVerified", "nativeNodeIdentityEquivalent",
@@ -64,8 +66,12 @@ CLASSROOM_ASSUMPTIONS = {"metresPerSourceCoordinateUnit": 1, "coordinateUnits": 
     "surfaceApproximation": "Pinned original-HDF5 polygons were fan-triangulated and stored as float32 STL. OBJ preserves those triangles; castellated-only meshing creates a distinct staircase boundary mesh on one common background grid. Snapping and layers are disabled; no native node/face identity or smooth-wall geometry accuracy is claimed.",
     "recipe": {"backgroundLargestExtentDivisions": BASE_DIVISIONS, "commonBackgroundGrid": True,
                "surfaceRefinementLevel": MAX_LEVEL, "snappingEnabled": False,
+               "uniformVolumeRefinementLevel": MAX_LEVEL,
+               "uniformRefinementDistanceFactorTimesBackgroundDiagonal": 1.01,
+               "selectedConnectedRegion": "Measured source interior seed; actual native addressing maps retain generated topology and all nonempty physical patches.",
+               "minimumGeneratedVolumeFractionRetained": .999,
                "maximumBackgroundCells": 100000,
-               "priorTrial": "38173480933: snapped impeller 60637 cells; 16 isolated zero-determinant cells and 1959 concave cells rejected by unchanged full checkMesh."},
+               "priorTrial": "38174426218: castellated impeller 76083 cells; 8 isolated zero-determinant cells and 3062 planar/concave cells rejected by unchanged full checkMesh."},
     "wallResolutionQualified": False, "layersEnabled": False, "rotationOrFlowPhysicsAuthored": False,
     "insidePoint": "Measured surface-facet candidates with explicit three-ray parity, closest-triangle distance and grid-plane avoidance; no original fluid-cell centre is claimed."}
 LIMITS = {"maximumSeconds": MAX_SECONDS, "maximumCpus": 1, "maximumMemoryBytes": MAX_MEMORY_BYTES,
@@ -73,7 +79,9 @@ LIMITS = {"maximumSeconds": MAX_SECONDS, "maximumCpus": 1, "maximumMemoryBytes":
     "maximumReportBytes": MAX_REPORT_BYTES, "maximumActualComponentCells": MAX_COMPONENT_CELLS,
     "exclusiveMaximumActualCombinedCells": MAX_COMBINED_CELLS,
     "enforcementOwner": "Independent native runner; preparation does not launch processes."}
-REQUIRED_ACCEPTANCE = ["All actual authored geometry stages completed under fixed resource limits",
+REQUIRED_ACCEPTANCE = ["All actual authored 15 geometry stages completed under fixed resource limits",
+    "Actual native source-seed connected-region selection before cell zones; immutable pre-selection mesh and exact point/cell/signed-face addressing preserve at least 99.9% of generated positive volume",
+    "Actual selected cell refinement levels uniformly 2; original HDF5/STL/OBJ surface targets are never removed or changed",
     "Each actual component <=450000 cells and combined strictly<1000000; all 11 original patch names/types with positive faces",
     "Only empty backgroundBox may remain; each exact all-fluid zone covers its component",
     "Unmodified native checkMesh -allGeometry -allTopology passes component and coupled mesh checks",
@@ -366,7 +374,9 @@ def case_files(component, component_surface, background, seed):
     snappy = header("snappyHexMeshDict") + "castellatedMesh true; snap false; addLayers false;\ngeometry\n{\n"
     snappy += component + " {type triSurfaceMesh; file \"" + component + "-union.obj\"; regions {\n" + regions + "\n}}\n}\n"
     snappy += "castellatedMeshControls\n{\nmaxLocalCells 450000; maxGlobalCells 450000; minRefinementCells 0; maxLoadUnbalance 0.1; nCellsBetweenLevels 3; resolveFeatureAngle 30; allowFreeStandingZoneFaces true; extendedRefinementSpan true;\n"
-    snappy += "features ({file \"" + component + "-union.eMesh\"; level 2;});\nrefinementSurfaces {" + component + " {level (2 2); regions {\n" + refinements + "\n}}}\nrefinementRegions {};\ninsidePoint " + vector(seed["pointNativeUnits"]) + ";\n}\n"
+    distance = 1.01 * float(np.linalg.norm(np.asarray(maximum) - np.asarray(minimum)))
+    snappy += "features ({file \"" + component + "-union.eMesh\"; level 2;});\nrefinementSurfaces {" + component + " {level (2 2); regions {\n" + refinements + "\n}}}\n"
+    snappy += "refinementRegions {" + component + " {mode distance; levels ((" + format(distance, ".17g") + " 2));}};\ninsidePoint " + vector(seed["pointNativeUnits"]) + ";\n}\n"
     snappy += "snapControls {nSmoothPatch 3; tolerance 2; nSolveIter 60; nRelaxIter 5; nFeatureSnapIter 10; explicitFeatureSnap true; multiRegionFeatureSnap true; implicitFeatureSnap false;}\n"
     snappy += "addLayersControls {layers {}; relativeSizes true; expansionRatio 1.2; finalLayerThickness 0.3; minThickness 0.1; nGrow 0; featureAngle 60; nRelaxIter 5; nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 0; nRelaxedIter 0;}\n"
     snappy += "meshQualityControls {maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minFlatness 0.5; minVol 1e-14; minTetQuality 1e-15; minArea 1e-14; minTwist 0.05; minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist 0; nSmoothScale 4; errorReduction 0.75;}\nmergeTolerance 1e-6; debug 0; writeFlags ();\n"
@@ -383,13 +393,25 @@ def case_files(component, component_surface, background, seed):
     return {key: value.encode("ascii") for key, value in result.items()}
 
 
-def commands(output):
+def commands(output, components=None):
     root = Path(output).absolute()
+    if components is None:
+        components = json_file(root, REPORT)["components"]
+    require(isinstance(components, list) and [row["component"] for row in components] == ["impeller", "volute"],
+            "Author region selection only from the two measured source component seeds.")
+    seeds = {}
+    for component in components:
+        seed = component["insidePointEvidence"]["pointNativeUnits"]
+        require(isinstance(seed, list) and len(seed) == 3 and all(type(v) in (float, int) and math.isfinite(v) for v in seed),
+                "Use the exact finite measured three-dimensional inside point for native region selection.")
+        seeds[component["component"]] = vector(seed)
     result = []
     for name in ("impeller", "volute"):
         case = str(root / (name + "-case"))
         result.extend([["blockMesh", "-case", case], ["surfaceFeatures", "-case", case],
-                       ["snappyHexMesh", "-case", case, "-overwrite"], ["topoSet", "-case", case, "-constant"],
+                       ["snappyHexMesh", "-case", case, "-overwrite"],
+                       ["splitMeshRegions", "-case", case, "-insidePoint", seeds[name], "-overwrite"],
+                       ["topoSet", "-case", case, "-constant"],
                        ["checkMesh", "-case", case, "-allGeometry", "-allTopology", "-writeSets"]])
     rotor, stator = str(root / "impeller-case"), str(root / "volute-case")
     result.extend([["mergeMeshes", "-case", rotor, "-addCases", '("' + stator + '")', "-overwrite"],
@@ -435,7 +457,7 @@ def prepare(surface_union_directory, surface_check_directory, output_directory):
     source_payloads = source_union_payloads(surfaces)
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(),
               "status": STATUS, "exampleDataCommit": union.source.PIN,
-              "foundationSourceCommit": SOURCE_COMMIT, "components": components, "nativeCommandArguments": commands(output),
+              "foundationSourceCommit": SOURCE_COMMIT, "components": components, "nativeCommandArguments": commands(output, components),
               "authoredFileRecords": [union.file_row(name, raw) for name, raw in sorted(authored.items())],
               "sourceSurfaceFileRecords": [union.file_row("source-surface/" + name, raw) for name, raw in sorted(source_payloads.items())],
               "sourceProofFileRecords": [union.file_row("source-surface-check/" + name, raw) for name, raw in sorted(proof_payloads.items())],
@@ -498,7 +520,7 @@ def verify_output(directory):
             and report.get("limits") == LIMITS and report.get("requiredAcceptance") == REQUIRED_ACCEPTANCE
             and report.get("claimBoundary") == CLAIM and report.get("references") == REFERENCES,
             "The declared geometry approximation, resource limits, engineering gates and references cannot be changed silently.")
-    require(report.get("nativeCommandArguments") == commands(output), "Only the fixed authored 13 geometry utility stages are allowed.")
+    require(report.get("nativeCommandArguments") == commands(output, report["components"]), "Only the fixed authored 15 geometry utility stages are allowed.")
     verified = union.verify_output(output / "source-surface")
     proof = verify_surface_proof(output / "source-surface-check", output / "source-surface", verified)
     source_payloads = source_union_payloads(output / "source-surface")

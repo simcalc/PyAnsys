@@ -178,12 +178,12 @@ class SnappyPreparationTests(unittest.TestCase):
                 output=root/"snappy"
                 report=case.prepare(surfaces,proof,output)
                 self.assertEqual(case.verify_output(output)["report"],report)
-                self.assertEqual(len(report["nativeCommandArguments"]),13)
+                self.assertEqual(len(report["nativeCommandArguments"]),15)
                 self.assertEqual([row[0]for row in report["nativeCommandArguments"]],
-                    ["blockMesh","surfaceFeatures","snappyHexMesh","topoSet","checkMesh"]*2+["mergeMeshes","createNonConformalCouples","checkMesh"])
-                self.assertEqual(report["nativeCommandArguments"][3][-1],"-constant")
+                    ["blockMesh","surfaceFeatures","snappyHexMesh","splitMeshRegions","topoSet","checkMesh"]*2+["mergeMeshes","createNonConformalCouples","checkMesh"])
+                self.assertEqual(report["nativeCommandArguments"][4][-1],"-constant")
                 self.assertTrue(all(row[-1] == "-writeSets" for row in report["nativeCommandArguments"] if row[0] == "checkMesh"))
-                self.assertEqual(report["nativeCommandArguments"][10],
+                self.assertEqual(report["nativeCommandArguments"][12],
                     ["mergeMeshes","-case",str(output/"impeller-case"),"-addCases",'("'+str(output/"volute-case")+'")',"-overwrite"])
                 self.assertFalse((output/"impeller-case/0").exists())
                 for flag in case.FALSE_FLAGS:
@@ -197,6 +197,7 @@ class SnappyPreparationTests(unittest.TestCase):
                     snappy=(folder/"system/snappyHexMeshDict").read_text()
                     self.assertIn("castellatedMesh true; snap false; addLayers false;",snappy)
                     self.assertIn("level (2 2)",snappy)
+                    self.assertIn("mode distance; levels ((",snappy)
                     self.assertIn("insidePoint ",snappy)
                     self.assertNotIn("locationInMesh",snappy)
                     self.assertIn("minDeterminant 0.001",snappy)
