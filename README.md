@@ -118,3 +118,16 @@ The source reader is separate from the Main application and its database. Extrac
 [Gmsh tutorial t13](https://gmsh.info/doc/texinfo/gmsh.html#t13) documents discrete-surface remeshing without an underlying CAD model. This is a possible next meshing method; it has not yet been executed or qualified for these impeller passages. Boundary identity must be checked after surface reclassification. A model meeting the Student count limit still needs a compatible native Student solver and numerical acceptance.
 
 The alternative solver route is **OpenFOAM on a standard public GitHub runner**. The project's separate [OpenFoam repository](https://github.com/simcalc/OpenFoam) already contains small official educational impeller benchmarks. Those 30-degree sector benchmarks are separate from this full impeller–volute example. The [OpenFOAM v12 converter](https://doc.cfd.direct/openfoam/user-guide-v12/mesh-conversion) expects legacy ASCII Fluent `.msh`, so the original `.msh.h5` files require an actual reviewed conversion or a new mesh; renaming the extension does not convert them.
+
+### Executed boundary preparation
+
+[Run 38155649489](https://github.com/simcalc/PyAnsys/actions/runs/38155649489) passed **55/55 tests** and extracted the actual source boundaries on the public runner. The earlier first run stopped at a regression-test import typo; the test binding was corrected and the full unchanged acceptance suite passed on this subsequent run. Both original mesh SHA-256 values remained unchanged.
+
+| Source | Boundary faces | Derived triangles | Open / non-manifold / winding-conflict edges |
+| --- | ---: | ---: | --- |
+| Impeller | 126,864 | 253,728 | 0 / 0 / 0 |
+| Volute | 39,917 | 42,332 | 0 / 0 / 0 |
+
+The [derived boundary release](https://github.com/simcalc/PyAnsys/releases/tag/frozen-rotor-boundaries-38155649489) has **11 named STL surfaces**, topology JSON, checksums and the upstream license. The boundary ZIP is **6,385,711 bytes**, SHA-256 `c1481ce15abcfb7d2336f366c73dd3565a9ea26dfbcc174d8c2c5b26708457e2`. The [topology report](https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-boundaries-38155649489/topology-report.json) is **68,245 bytes**, SHA-256 `1dc7cebaeac04506dcfbe9da3ce123f149cc94cb44c6990b9b11c3f4195d2595`. Published ZIP/report bytes were compared through anonymous HTTPS downloads on the runner, then every asset and every STL were independently verified again by the NPSH project.
+
+The polygon fan is a documented surface derivative: **124,758 impeller faces and 2,290 volute faces** have measurable nonplanarity under the recorded relative `1e-12` diagnostic. Native 3D vertices and winding are retained, while the report records plane deviation and float32 coordinate error. Subsequent mesh generation must assess the geometric effect of the chosen triangle diagonal and any remeshing. These topology results still do not establish self-intersection clearance, outward orientation, coordinate-unit basis, new volume cells, Student fit, CFD or pump NPSHr.
