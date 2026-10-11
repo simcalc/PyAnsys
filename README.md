@@ -515,3 +515,36 @@ no flow solver ran. The common-grid castellated-only recipe is a distinct
 bounded trial, not a reclassification of that failed mesh. Smooth-wall geometry
 accuracy, passage fidelity and physical pump performance remain unqualified
 even if its subsequent native quality/interface checks pass.
+
+### Independent exploratory MRF lane for an admitted approximate mesh
+
+The manual `Frozen Rotor approximate geometry exploratory MRF baseline`
+workflow freshly repeats source extraction, surface and full geometry checks
+on one commit. Only an actually accepted volume, connected component meshes,
+all eleven nonempty source patch roles and the unchanged NCC coverage gates
+can proceed. Immutable component snapshots from before merge are copied into
+a fresh physics case. Merge, NCC field creation, full native mesh checks and
+500 steady SST/MRF iterations are separate native steps.
+
+The predeclared classroom conditions are water at 293.15 K, 1450 rpm about
+the positive z axis, 90 kg/s and **300,000 Pa absolute** reference pressure.
+Gravity is disabled in the solver; head conversion uses 9.81 m/s². Kinematic
+pressure is converted to absolute pressure exactly once. Inputs, original
+surfaces, generated meshes, runtime binaries, rewritten initial fields,
+native logs, endpoint fields and sampling files are bound by byte hashes.
+Equation stages are reduced by Python from actual numerical evidence.
+
+This physics trial is bounded to **one CPU, 4 GiB, 1200 seconds and 1 GiB**.
+The outer 1260-second process allowance includes reduction and report retention.
+The 75-minute workflow envelope covers all bounded prerequisite stages and
+setup. No paid, custom or self-hosted runner is allowed.
+
+Native execution and numerical acceptance are separate immutable reports.
+Workflow success requires both actual CFD evidence and the unchanged
+residual, conservation, stationary head/flow, noncavitating pressure and
+interface criteria. `numericalBaselineQualified` applies only to this exact
+declared approximate geometry. `qualifiedBaseline`, geometry accuracy,
+wall resolution, mesh/time convergence, cavitation/NPSH3, physical transient
+and restart stay false until their respective actual research gates pass.
+No Main code, Pump database, engineering lock, local port or deployed Main
+application is modified by this public workflow.
