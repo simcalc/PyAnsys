@@ -98,3 +98,23 @@ Compare the **combined impeller plus volute** cell count against the Student edi
 The contiguous stored zone ranges confirm these component counts. The original combined cell inventory **exceeds the Student cell limit by 141,763 cells**. The lower node count does not cancel the cell-limit violation. This inspection did not execute native append, verify geometric nonoverlap or create a joined case. The source's two cell zones and all 11 named boundary/interface surfaces are present in the stored metadata.
 
 For the FREE Student path, derive and check a separate lighter learning mesh while preserving the official originals. Reducing the reported number or calling one component the full impeller–volute model would not satisfy the requirement. Coordinate units, mesh quality, interface consistency, RAM use, solver/license compatibility and numerical convergence remain unverified. This completed metadata run supplies no physical CFD, cavitation, NPSHr or transient result.
+
+## FREE continuation from the original boundary geometry
+
+The next manual workflow, **Extract official Frozen Rotor boundary surfaces**, prepares source geometry for a separately reviewed remeshing study. It reads every HDF5 face-node and coordinate section by its explicit global ID range. A face is selected from actual `c0`/`c1` adjacency, with exactly one exterior cell ID zero; a surface name alone cannot identify a boundary. Zone names and IDs, original checksums and derived-file checksums remain traceable.
+
+The output contains tagged binary STL surfaces and `topology-report.json`. It checks native node-ID edge incidence, winding, duplicate faces, convex polygon projection and float32 triangulation. Coordinates retain **UNVERIFIED native units**. Per-zone open edges are expected at patch junctions; the combined component audit is recorded separately. Edge closure does not establish geometric self-intersection clearance, a valid fluid volume or solver mesh quality. No volume cells are created and no solver runs in this workflow.
+
+The source reader is separate from the Main application and its database. Extraction is limited to 2 GiB address space, 300 seconds, one numerical thread and 25 MiB of surface/report output. Release assets include the upstream license and checksums; anonymous download verification follows publication.
+
+| Stage | Required evidence |
+| --- | --- |
+| 1. Original boundary extraction | Complete section mapping, source/derived checksums, zone identity and honest topology findings |
+| 2. New lighter volume mesh | Explicit coordinate-unit basis, boundary and interface mapping, geometric deviation, actual cells/nodes and volume quality |
+| 3. Steady baseline | Native solver execution, compatible Q/RPM/fluid/pressure datum, residuals, conservation and numerical sensitivity |
+| 4. Cavitation and NPSHr | Matched operating conditions, liquid/vapor properties, absolute suction pressure sweep and bracketed head-reduction criterion |
+| 5. Physical transient | Actual rotor motion and time history, matched checkpoints/restart, time-step and spatial verification |
+
+[Gmsh tutorial t13](https://gmsh.info/doc/texinfo/gmsh.html#t13) documents discrete-surface remeshing without an underlying CAD model. This is a possible next meshing method; it has not yet been executed or qualified for these impeller passages. Boundary identity must be checked after surface reclassification. A model meeting the Student count limit still needs a compatible native Student solver and numerical acceptance.
+
+The alternative solver route is **OpenFOAM on a standard public GitHub runner**. The project's separate [OpenFoam repository](https://github.com/simcalc/OpenFoam) already contains small official educational impeller benchmarks. Those 30-degree sector benchmarks are separate from this full impeller–volute example. The [OpenFOAM v12 converter](https://doc.cfd.direct/openfoam/user-guide-v12/mesh-conversion) expects legacy ASCII Fluent `.msh`, so the original `.msh.h5` files require an actual reviewed conversion or a new mesh; renaming the extension does not convert them.

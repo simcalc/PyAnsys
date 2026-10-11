@@ -1,0 +1,78 @@
+name: Extract official Frozen Rotor boundary surfaces
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-boundary-extraction
+  cancel-in-progress: false
+
+jobs:
+  boundaries:
+    name: FREE public runner bounded boundary extraction
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ""
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check out this independent repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the public standard GitHub runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the separate bounded geometry reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/boundary-reader"
+          "$RUNNER_TEMP/boundary-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/boundary-reader/bin/python" -m pip check
+      - name: Verify extraction, package and isolation contracts
+        run: '"$RUNNER_TEMP/boundary-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Extract actual native boundary data with enforced limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -v 2097152
+          timeout --kill-after=10s 300s "$RUNNER_TEMP/boundary-reader/bin/python" -B tools/extract_frozen_rotor_boundaries.py --output-dir "$RUNNER_TEMP/frozen-rotor-boundaries"
+      - name: Package only the exact report and verified binary surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/boundary-reader/bin/python" -B tools/build_boundary_package.py --input-directory "$RUNNER_TEMP/frozen-rotor-boundaries" --output-directory "$RUNNER_TEMP/frozen-rotor-boundary-release"
+      - name: Publish the derived surface package and original license
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/frozen-rotor-boundary-release"
+          gh release create "frozen-rotor-boundaries-${GITHUB_RUN_ID}" frozen-rotor-boundaries.zip topology-report.json SHA256SUMS EXAMPLE_DATA_LICENSE.txt README-boundaries.txt --repo simcalc/PyAnsys --target "$GITHUB_SHA" --title "Frozen Rotor derived boundary surfaces ${GITHUB_RUN_ID}" --notes-file README-boundaries.txt
+      - name: Verify anonymous HTTPS downloads of the report and ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/frozen-rotor-boundary-release"
+          curl --proto '=https' --proto-redir '=https' --max-time 30 --max-filesize 131072 --retry 3 --retry-delay 3 --fail --silent --show-error --location "https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-boundaries-${GITHUB_RUN_ID}/topology-report.json" --output anonymous-topology-report.json
+          curl --proto '=https' --proto-redir '=https' --max-time 30 --max-filesize 26214400 --retry 3 --retry-delay 3 --fail --silent --show-error --location "https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-boundaries-${GITHUB_RUN_ID}/frozen-rotor-boundaries.zip" --output anonymous-frozen-rotor-boundaries.zip
+          cmp topology-report.json anonymous-topology-report.json
+          cmp frozen-rotor-boundaries.zip anonymous-frozen-rotor-boundaries.zip
+          sha256sum anonymous-topology-report.json anonymous-frozen-rotor-boundaries.zip
