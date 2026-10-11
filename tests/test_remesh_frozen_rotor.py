@@ -24,6 +24,31 @@ FACES = [(1, 3, 2), (1, 2, 4), (2, 3, 4), (3, 1, 4)]
 
 
 class RemeshContracts(unittest.TestCase):
+    def test_msh_coordinates_round_trip_without_repairing_topology(self):
+        actual = {1:(0.,0.,1.), 2:(1.,0.,1.), 3:(0.,1.,1.), 4:(0.,0.,1.0000000000000002)}
+        before = b"$MeshFormat\n2.2 0 8\n$EndMeshFormat\n$Nodes\n4\n"
+        before += b"".join((str(node)+" "+" ".join(format(value,'.16g') for value in xyz)+"\n").encode('ascii') for node,xyz in actual.items())
+        topology = b"$EndNodes\n$Elements\n1\n1 4 2 99 99 1 2 3 4\n$EndElements\n"
+        with TemporaryDirectory() as directory:
+            target = Path(directory)/'owned.msh'; target.write_bytes(before+topology)
+            proof = remesh.preserve_msh2_float64_nodes(target,actual)
+            self.assertTrue(proof['allCoordinatesFloat64RoundTripVerified'])
+            self.assertGreater(proof['maximumGmsh16DigitSpellingDifferenceNativeUnits'],0)
+            self.assertFalse(proof['sourceCoordinatesMoved'])
+            self.assertTrue(target.read_bytes().endswith(topology))
+            self.assertIn(b'4 0 0 1.0000000000000002\n',target.read_bytes())
+            self.assertFalse((Path(directory)/'owned.msh.roundtrip').exists())
+
+    def test_msh_coordinate_rewrite_rejects_foreign_nodes_without_overwrite(self):
+        for raw in (b'$Nodes\n1\n999 0 0 0\n$EndNodes\n', b'$Nodes\n1\n1 1 0 0\n$EndNodes\n',
+                    b'$Nodes\n1\n1 nan 0 0\n$EndNodes\n', b'$Nodes\n2\n1 0 0 0\n1 0 0 0\n$EndNodes\n'):
+            with self.subTest(raw=raw), TemporaryDirectory() as directory:
+                target=Path(directory)/'owned.msh'; target.write_bytes(raw)
+                with self.assertRaises(remesh.RemeshIssue):
+                    remesh.preserve_msh2_float64_nodes(target,{1:(0.,0.,0.)})
+                self.assertEqual(target.read_bytes(),raw)
+                self.assertFalse((Path(directory)/'owned.msh.roundtrip').exists())
+
     def test_live_progress_does_not_promote_candidate_or_expose_extra_report_fields(self):
         with TemporaryDirectory() as directory:
             target = Path(directory)
@@ -376,11 +401,24 @@ class RemeshContracts(unittest.TestCase):
                 value=-1e-15 if quantity=="minSICN" and (not self.optimised or invalid_final_quality) else .5
                 return [value]*len(tags)
         mesh=Mesh();mesh.calls=[]
+        def fixture_write(path):
+            node_tags,coordinates,_=mesh.getNodes()
+            raw=b'$MeshFormat\n2.2 0 8\n$EndMeshFormat\n$PhysicalNames\n3\n2 11 "first"\n2 12 "second"\n3 99 "fluid"\n$EndPhysicalNames\n$Nodes\n'+str(len(node_tags)).encode('ascii')+b"\n"
+            for index,node in enumerate(node_tags):
+                raw+=(str(node)+" "+" ".join(format(value,'.16g') for value in coordinates[3*index:3*index+3])+"\n").encode('ascii')
+            raw+=b"$EndNodes\n$Elements\n8\n"
+            for index,face in enumerate(FACES):
+                tag=11 if index<2 else 12
+                raw+=(f'{index+1} 2 2 {tag} {tag} '+" ".join(map(str,face))+"\n").encode('ascii')
+            _,tags,nodes=mesh.getElements(3,1)
+            for index,tag in enumerate(tags[0]):
+                raw+=(f'{tag} 4 2 99 99 '+" ".join(map(str,nodes[0][index*4:index*4+4]))+"\n").encode('ascii')
+            Path(path).write_bytes(raw+b"$EndElements\n")
         gmsh=SimpleNamespace(option=SimpleNamespace(setNumber=lambda key,value:options.update({key:value})),
             model=SimpleNamespace(mesh=mesh,add=lambda *args:None,addDiscreteEntity=lambda *args:None,
                 getEntities=lambda dim:[(2,11),(2,12)],addPhysicalGroup=lambda *args:None,setPhysicalName=lambda *args:None,
                 remove=lambda:None,geo=SimpleNamespace(addSurfaceLoop=lambda *args:1,addVolume=lambda *args:1,synchronize=lambda:None)),
-            write=lambda path:Path(path).write_bytes(b"$MeshFormat\n2.2 0 8\n$EndMeshFormat\nSynthetic unit fixture only\n"))
+            write=fixture_write)
         model=self.model();model["nativeCounts"]={"cellCount":10,"nodeCount":4}
         return gmsh,model,options
 

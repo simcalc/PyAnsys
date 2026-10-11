@@ -584,6 +584,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     if target.exists() or target.is_symlink():
         raise RemeshIssue("A generated mesh cannot overwrite an existing output.")
     gmsh.write(str(target))
+    serialization = preserve_msh2_float64_nodes(target, points)
     if not target.is_file() or target.is_symlink() or not 0 < target.stat().st_size <= MAX_OUTPUT_BYTES:
         raise RemeshIssue("A regular bounded generated MSH file is required.")
     with target.open("rb") as stream:
@@ -593,9 +594,19 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     with target.open("rb") as stream:
         while part := stream.read(1024**2):
             digest.update(part)
+    # Re-read every actual serialized triangle/tetrahedron with the independent
+    # converter admission reader. In-memory native quality cannot certify a
+    # differently rounded file, and no zero/negative cell is tolerated here.
+    import frozen_rotor_openfoam_case as converter_admission
+    published = converter_admission.msh_inventory(target.read_bytes())
+    if published["nodeCount"] != len(points) or published["cellCount"] != len(cells):
+        raise RemeshIssue("The actual serialized mesh must preserve every generated node and volume cell.")
+    serialization["everyPublishedCellPositiveVolumeVerified"] = True
+    serialization["independentSerializedAdmissionReader"] = "frozen_rotor_openfoam_case.msh_inventory"
     result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest.hexdigest(), "format": "gmsh-msh2.2-ascii"},
               "sourceCellCount": model["nativeCounts"]["cellCount"], "sourceNodeCount": model["nativeCounts"]["nodeCount"],
               "generatedCellCount": len(cells), "generatedNodeCount": len(points), "sourceBoundaryAudit": native_audit,
+              "coordinateSerialization": serialization,
               "sourceSeamPartition": {"method": "Exact native-zone discrete surfaces and createTopology(True,True); all original facets fixed with MeshOnlyEmpty=1 and no surface reparametrization",
                   "partitionCount": len(zones), "finalSurfaceEntityCount": len(surface_rows), "completeNativeTriangleCoverageVerified": True,
                   "mixedSourceZoneEntityCount": 0, "nativeGlobalNodeCoordinatesVerified": True, "nearestTagGuessPerformed": False},
@@ -614,6 +625,72 @@ def remesh_component(model, name, destination, gmsh, np, progress):
                    "substitution": metrics, "result": {"value": metrics["totalTetraVolumeAssumedM3"], "unit": "m3 under explicit classroom scale assumption"}}]}
     gmsh.model.remove()
     return result
+
+
+def preserve_msh2_float64_nodes(target, points):
+    """Round-trip actual Gmsh float64 coordinates; keep all topology bytes.
+
+    Gmsh 4.15.2 MVertex::writeMSH2 uses %.16g, which can alter a double.
+    This solely replaces the attempt-owned $Nodes numeric spelling with .17g.
+    It never moves a point, changes a tag/connectivity or repairs a cell.
+    """
+    target = Path(target)
+    if target.is_symlink() or not target.is_file() or not 0 < target.stat().st_size <= MAX_OUTPUT_BYTES:
+        raise RemeshIssue("Round-trip serialization requires the actual bounded fresh MSH output.")
+    temporary = target.with_name(target.name + ".roundtrip")
+    if temporary.exists() or temporary.is_symlink():
+        raise RemeshIssue("Use a fresh owned coordinate-serialization file.")
+    seen, written, sections, maximum_difference = set(), 0, 0, 0.
+    try:
+        with target.open("rb") as source, temporary.open("xb") as destination:
+            def emit(raw):
+                nonlocal written
+                written += len(raw)
+                if written > MAX_OUTPUT_BYTES:
+                    raise RemeshIssue("The serialized actual MSH exceeds its byte bound.")
+                destination.write(raw)
+            for line in source:
+                emit(line)
+                if line.strip() != b"$Nodes":
+                    continue
+                sections += 1
+                count_line = next(source, b"")
+                if sections != 1 or not re.fullmatch(rb"\d+\s*", count_line) or int(count_line) != len(points):
+                    raise RemeshIssue("MSH nodes must preserve the complete unique actual Gmsh node inventory.")
+                emit(count_line)
+                for _ in range(int(count_line)):
+                    values = next(source, b"").split()
+                    if len(values) != 4 or not re.fullmatch(rb"\d+", values[0]):
+                        raise RemeshIssue("Actual ASCII MSH node records must be complete.")
+                    node = int(values[0])
+                    if node in seen or node not in points:
+                        raise RemeshIssue("MSH serialization cannot change any actual global node ID.")
+                    xyz, stored = points[node], tuple(float(value) for value in values[1:])
+                    if len(xyz) != 3 or not all(math.isfinite(value) for value in (*xyz, *stored)):
+                        raise RemeshIssue("All actual and serialized coordinates must be finite.")
+                    # Only the known %.16g spelling is allowed as the input;
+                    # mismatched coordinates cannot be silently overwritten.
+                    if stored != tuple(float(format(value, ".16g")) for value in xyz):
+                        raise RemeshIssue("The generated writer coordinates differ from the actual Gmsh points.")
+                    maximum_difference = max(maximum_difference, *(abs(a-b) for a,b in zip(xyz, stored)))
+                    rendered = tuple(format(value, ".17g") for value in xyz)
+                    if tuple(float(value) for value in rendered) != tuple(xyz):
+                        raise RemeshIssue("Every coordinate must round-trip to the exact actual float64 value.")
+                    emit((str(node) + " " + " ".join(rendered) + "\n").encode("ascii")); seen.add(node)
+                if next(source, b"").strip() != b"$EndNodes":
+                    raise RemeshIssue("The exact complete MSH node-section terminator is required.")
+                emit(b"$EndNodes\n")
+        if sections != 1 or seen != set(points):
+            raise RemeshIssue("Serialized nodes must account for every actual point exactly once.")
+        os.replace(temporary, target)
+    finally:
+        if temporary.is_file() and not temporary.is_symlink():
+            temporary.unlink()  # Only the exact file created by this attempt.
+    return {"significantDigits": 17, "actualNodeCount": len(seen), "allCoordinatesFloat64RoundTripVerified": True,
+            "maximumGmsh16DigitSpellingDifferenceNativeUnits": maximum_difference,
+            "maximumPublishedCoordinateDifferenceFromActualGmshPoints": 0,
+            "topologyAndPhysicalTagsChanged": False, "sourceCoordinatesMoved": False,
+            "reference": "https://github.com/live-clones/gmsh/blob/gmsh_4_15_2/src/geo/MVertex.cpp#L132"}
 
 
 def enforce_runtime_limits():
