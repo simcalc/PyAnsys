@@ -273,6 +273,32 @@ class PreparationContracts(unittest.TestCase):
                 (mesh/"points").write_text(wrong)
                 with self.subTest(wrong=wrong),self.assertRaises(case.CaseIssue):case.verify_conversion(root,expected,log)
 
+    def test_foundation12_cell_zone_list_header_preserves_converter_gates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,log=self.native_fixture(root)
+            expected=case.msh_inventory(MSH)
+            original=(mesh/"cellZones").read_text().replace("class regIOobject", "class cellZoneList")
+            (mesh/"cellZones").write_text(original)
+            result=case.verify_conversion(root,expected,log)
+            self.assertTrue(result["conversionVerified"])
+            self.assertFalse(result["nativeGeometryQualityVerified"])
+            self.assertFalse(result["actualCfdRunVerified"])
+            self.assertEqual(result["maximumCoordinateDeviationAssumedM"],0)
+            for before,after in (("class cellZoneList","class faceZoneList"),
+                                 ("class cellZoneList","class pointZoneList"),
+                                 ("object cellZones","object faceZones"),
+                                 ("format ascii","format binary"),
+                                 ("rotating-fluid","other-fluid"),
+                                 ("List<label> 1(0)","List<label> 1(1)"),
+                                 ("List<label> 1(0)","List<label> 2(0 0)")):
+                (mesh/"cellZones").write_text(original.replace(before,after))
+                with self.subTest(before=before,after=after),self.assertRaises(case.CaseIssue):
+                    case.verify_conversion(root,expected,log)
+            (mesh/"cellZones").write_text(original)
+            points=(mesh/"points").read_text()
+            (mesh/"points").write_text(points.replace("class vectorField","class cellZoneList"))
+            with self.assertRaises(case.CaseIssue):case.verify_conversion(root,expected,log)
+
     def test_wall_class_change_has_separate_native_pre_and_post_gates(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);mesh,log=self.native_fixture(root)
@@ -350,6 +376,23 @@ class PreparationContracts(unittest.TestCase):
             self.assertFalse(result["qualifiedBaseline"])
             self.assertFalse(result["mainApplicationWrites"])
             self.assertEqual(result["checkMeshLogSha256"],case.sha256(log.read_bytes()).hexdigest())
+
+    def test_foundation12_cell_zone_list_merged_gate_preserves_zone_ownership(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            original=(mesh/"cellZones").read_text().replace("class regIOobject","class cellZoneList")
+            (mesh/"cellZones").write_text(original)
+            result=case.verify_merged_mesh(root,expected,log)
+            self.assertEqual(result["cellZones"],{"rotating-fluid":1,"stationary-fluid":1})
+            self.assertTrue(result["coupledInterfaceCoverageVerified"])
+            self.assertFalse(result["qualifiedBaseline"])
+            self.assertFalse(result["actualCfdRunVerified"])
+            # Legitimate storage does not permit exchanging rotor/stator cell ownership.
+            (mesh/"cellZones").write_text(original.replace("rotating-fluid {type cellZone; cellLabels List<label> 1(0);}",
+                                                       "rotating-fluid {type cellZone; cellLabels List<label> 1(1);}").replace(
+                                                       "stationary-fluid {type cellZone; cellLabels List<label> 1(1);}",
+                                                       "stationary-fluid {type cellZone; cellLabels List<label> 1(0);}"))
+            with self.assertRaises(case.CaseIssue):case.verify_merged_mesh(root,expected,log)
 
     def test_merged_gate_requires_real_completed_log_matching_cells_and_coverage(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -395,8 +395,11 @@ def foam_text(path):
     match = re.search(r"FoamFile\s*\{([^{}]*)\}", text)
     if not match or not re.search(r"\bformat\s+ascii\s*;", match[1]):
         raise CaseIssue("Native verification requires actual ASCII FoamFile storage.")
+    # Foundation 12 (86e126a7bc4dbfaed949bbc58c9f0fdd67acc059):
+    # cellZoneList.H declares this class; polyMeshIO.C binds object cellZones.
+    # It is valid only for that role, with its counted zone ownership checked below.
     expected = {"points": {"vectorField"}, "faces": {"faceList"}, "owner": {"labelList"}, "neighbour": {"labelList"},
-                "boundary": {"polyBoundaryMesh"}, "cellZones": {"regIOobject", "cellZoneMesh"}}
+                "boundary": {"polyBoundaryMesh"}, "cellZones": {"regIOobject", "cellZoneMesh", "cellZoneList"}}
     native_class = re.search(r"\bclass\s+(\w+)\s*;", match[1])
     native_object = re.search(r"\bobject\s+([A-Za-z0-9_-]+)\s*;", match[1])
     name = Path(path).name
