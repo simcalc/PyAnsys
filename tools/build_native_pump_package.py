@@ -27,6 +27,10 @@ MANIFEST = "native-case-evidence.json"
 REPORTS = {"runtime-identity.json", "geometry-identity.json", "native-input-manifest.json", "classroom-study.json",
            "openfoam-preparation.json", "openfoam-execution.json", "native-baseline-reduction.json", "remesh-report.json"}
 OPTIONAL_REPORTS = {"openfoam-acceptance.json"}
+ORIGINAL_PREPARATION = "untirta.frozen-rotor-original-openfoam-preparation.v1"
+ORIGINAL_EXECUTION = "untirta.frozen-rotor-original-openfoam-execution.v1"
+ORIGINAL_REPORTS = (REPORTS - {"remesh-report.json"}) | {"native-conversion.json"}
+ORIGINAL_WORKSPACE = 1024 * 1024**2
 FIELDS = {"p", "U", "k", "omega", "nut", "phi", "U2", "totalPressurePa", "staticPressurePa", "yPlus", "polyFaces"}
 MESH = {"points", "faces", "owner", "neighbour", "boundary", "cellZones", "faceZones", "pointZones", "polyFaces"}
 CONSTANT = {"physicalProperties", "momentumTransport", "MRFProperties", "polyFaces"}
@@ -39,6 +43,8 @@ REQUIRED_INPUTS = {"impeller-case/0/" + name for name in ("p", "U", "k", "omega"
                   {"impeller-case/system/" + name for name in SYSTEM}
 REQUIRED_COMPLETED = REPORTS | {"impeller-case/constant/polyMesh/" + name for name in ("points", "faces", "owner", "neighbour", "boundary", "cellZones")} | \
                      {"impeller-case/500/" + name for name in ("p", "U", "k", "omega")}
+ORIGINAL_INPUTS = REQUIRED_INPUTS - {"impeller-case/system/changeDictionaryDict"}
+ORIGINAL_COMPLETED = (REQUIRED_COMPLETED - REPORTS) | ORIGINAL_REPORTS | {"impeller-case/sourceFaceIds", "volute-case/sourceFaceIds"}
 SECRET = re.compile(rb"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|Authorization\s*:\s*Bearer\s+\S+)")
 ACTIVE_CODE = re.compile(rb"#(?:codeStream|include(?!Etc\s+\"caseDicts/setConstraintTypes\"))|\bcodedFixedValue\b|\bcodeInclude\b|\btype\s+coded\b")
 
@@ -101,7 +107,7 @@ def role(relative):
     require(len(relative) <= 240 and len(parts) <= 6 and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", part) for part in parts),
             "A finite visible native data path is required.")
     if len(parts) == 1:
-        if relative in REPORTS | OPTIONAL_REPORTS:
+        if relative in REPORTS | OPTIONAL_REPORTS | ORIGINAL_REPORTS:
             return "native-report", True
         if relative == "EXAMPLE_DATA_LICENSE.txt":
             return "upstream-license", True
@@ -109,6 +115,8 @@ def role(relative):
         return "native-log", True
     if parts[0] in {"impeller-case", "volute-case"}:
         component = parts[0].split("-")[0]
+        if parts[1:] == ("sourceFaceIds",):
+            return "native-topology", True
         if parts[1:] == (component + ".msh",):
             return "excluded-component-msh-duplicate", False
         found = case_role(parts[1:])
@@ -119,6 +127,13 @@ def role(relative):
 
 def scan(root):
     files, total, visited = [], 0, 0
+    workspace_limit = MAX_WORKSPACE
+    preparation_path = root / "openfoam-preparation.json"
+    if preparation_path.is_file() and json_record(preparation_path).get("schemaVersion") == ORIGINAL_PREPARATION:
+        # The original lane retains both source component polyMeshes plus the
+        # merged case. The archive's unchanged 512 MiB extracted-data admission
+        # still applies; excluded component copies are never sent downstream.
+        workspace_limit = ORIGINAL_WORKSPACE
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -140,7 +155,7 @@ def scan(root):
                 require(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o111 and 0 < info.st_size <= MAX_FILE,
                         "Only bounded nonempty non-executable regular evidence files are permitted.")
                 total += info.st_size
-                require(total <= MAX_WORKSPACE, "The input native workspace exceeds 512 MiB.")
+                require(total <= workspace_limit, "The input native workspace exceeds its declared finite lane budget.")
                 kind, include = role(relative)
                 files.append((relative, path, info, kind, include))
     require(sum(row[4] for row in files) <= MAX_ENTRIES, "The native archive entry count exceeds the fixed bound.")
@@ -148,19 +163,25 @@ def scan(root):
 
 
 def validate_report_claims(root, names):
-    require({"openfoam-preparation.json", "openfoam-execution.json"} | REQUIRED_INPUTS <= names,
-            "Required native preparation/execution reports and authored case inputs are absent.")
+    require({"openfoam-preparation.json", "openfoam-execution.json"} <= names,
+            "Required native preparation/execution reports are absent.")
     preparation, execution = json_record(root / "openfoam-preparation.json"), json_record(root / "openfoam-execution.json")
+    original = preparation.get("schemaVersion") == ORIGINAL_PREPARATION
+    expected_schema = ORIGINAL_EXECUTION if original else "untirta.frozen-rotor-openfoam-execution.v1"
+    expected_status = "ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED" if original else "MRF_EXECUTED_ACCEPTANCE_REQUIRED"
+    required_inputs = ORIGINAL_INPUTS if original else REQUIRED_INPUTS
+    required_completed = ORIGINAL_COMPLETED if original else REQUIRED_COMPLETED
+    require(required_inputs <= names, "Required authored native case inputs are absent.")
     require(preparation.get("exampleDataCommit") == PIN and preparation.get("mainApplicationWrites") is False and
-            execution.get("schemaVersion") == "untirta.frozen-rotor-openfoam-execution.v1" and execution.get("mainApplicationWrites") is False,
+            execution.get("schemaVersion") == expected_schema and execution.get("mainApplicationWrites") is False,
             "Preserve exact educational source provenance and Main isolation.")
     for flag in ("simulationExecuted", "actualCfdRunVerified", "qualifiedBaseline"):
         require(isinstance(execution.get(flag), bool), "Actual execution flags must be explicit booleans: " + flag)
-    require(not execution["actualCfdRunVerified"] or (execution["simulationExecuted"] and execution.get("status") == "MRF_EXECUTED_ACCEPTANCE_REQUIRED"),
+    require(not execution["actualCfdRunVerified"] or (execution["simulationExecuted"] and execution.get("status") == expected_status),
             "Actual CFD cannot be claimed from an unexecuted or corrected native stage.")
     require(not execution["qualifiedBaseline"] or execution["actualCfdRunVerified"], "Numerical baseline qualification needs an actual verified execution.")
     if execution["actualCfdRunVerified"]:
-        require(REQUIRED_COMPLETED <= names, "Verified native execution needs all actual bound reports, mesh and final fields.")
+        require(required_completed <= names, "Verified native execution needs all actual bound reports, mesh and final fields.")
         require(any(name.startswith("impeller-case/postProcessing/") for name in names) and any(name.startswith("logs/") for name in names),
                 "Verified native execution requires actual numerical tables and native logs.")
     return execution
@@ -212,6 +233,9 @@ def build_package(execution_directory):
     files, workspace_bytes = scan(root)
     names = {row[0] for row in files if row[4]}
     execution = validate_report_claims(root, names)
+    original = execution.get("schemaVersion") == ORIGINAL_EXECUTION
+    required_completed = ORIGINAL_COMPLETED if original else REQUIRED_COMPLETED
+    workspace_limit = ORIGINAL_WORKSPACE if original else MAX_WORKSPACE
     records, created = [], []
     try:
         with ZipFile(archive, "x", ZIP_DEFLATED, compresslevel=6, allowZip64=False) as bundle:
@@ -259,6 +283,8 @@ def build_package(execution_directory):
                 require((after.st_size, after.st_mtime_ns, after.st_ino) == (info.st_size, info.st_mtime_ns, info.st_ino),
                         "Native evidence changed during archiving; package a completed immutable run.")
         require(archive.stat().st_size <= MAX_ZIP, "Compressed native evidence exceeds 128 MiB.")
+        require(sum(row["bytes"] for row in records) <= MAX_WORKSPACE,
+                "Included native evidence must remain within the unchanged 512 MiB extraction budget.")
         with ZipFile(archive) as bundle:
             require(bundle.namelist() == [row["path"] for row in records], "Native archive readback must preserve the exact file inventory.")
             for row in records:
@@ -276,14 +302,14 @@ def build_package(execution_directory):
                     "files": records, "archive": {"name": ARCHIVE, "bytes": archive.stat().st_size, "sha256": zip_digest.hexdigest()},
                     "inputWorkspaceBytes": workspace_bytes, "archivedBytes": sum(row["bytes"] for row in records),
                     "excludedDuplicates": [row[0] for row in files if not row[4]],
-                    "missingOptionalEvidence": sorted(REQUIRED_COMPLETED - names), "upstreamLicenseIncluded": "EXAMPLE_DATA_LICENSE.txt" in names,
+                    "missingOptionalEvidence": sorted(required_completed - names), "upstreamLicenseIncluded": "EXAMPLE_DATA_LICENSE.txt" in names,
                     "nativeAcceptanceReport": "openfoam-acceptance.json" if "openfoam-acceptance.json" in names else None,
                     "simulationExecuted": execution["simulationExecuted"], "actualCfdRunVerified": execution["actualCfdRunVerified"],
                     "qualifiedBaseline": execution["qualifiedBaseline"], "executionStatus": execution.get("status"),
                     "preliminaryBaselineQualified": preliminary, "preliminaryQualificationScope": qualification_scope,
                     "baselineQualificationScope": execution.get("baselineQualificationScope"), "restartVerified": False,
                     "physicalValidationVerified": False, "mainApplicationWrites": False,
-                    "limits": {"workspaceBytes": MAX_WORKSPACE, "fileBytes": MAX_FILE, "archiveBytes": MAX_ZIP, "entries": MAX_ENTRIES},
+                    "limits": {"workspaceBytes": workspace_limit, "fileBytes": MAX_FILE, "archiveBytes": MAX_ZIP, "entries": MAX_ENTRIES},
                     "claimBoundary": "Native evidence data copy and checksum readback only. Execution flags are preserved from the runner; no additional convergence, mesh/time independence, NPSH3, physical validation or restart claim."}
         raw = canonical(manifest)
         require(len(raw) <= MAX_REPORT, "The native package manifest exceeds 128 KiB.")

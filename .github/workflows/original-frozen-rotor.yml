@@ -1,0 +1,116 @@
+name: Frozen Rotor original polygon volume MRF baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-original-native
+  cancel-in-progress: false
+
+jobs:
+  original:
+    name: FREE original-volume conversion and native baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE standard runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated source reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/original-reader"
+          "$RUNNER_TEMP/original-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/original-reader/bin/python" -m pip check
+      - name: Verify geometry and equation contracts
+        run: '"$RUNNER_TEMP/original-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Download only the two immutable official volume sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/original-reader/bin/python" -B - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          import inspect_frozen_rotor_mesh as source
+          target = Path(os.environ['RUNNER_TEMP']) / 'frozen-original-sources'
+          target.mkdir()
+          records = [source.verify_file(source.download_mesh(target, name), name) for name in source.MESH_NAMES]
+          print(json.dumps({'sourceFiles': records, 'simulationExecuted': False, 'mainApplicationWrites': False}))
+          PY
+      - name: Preserve every original polygon, cell and float64 coordinate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-original-convert-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 600s \
+            "$RUNNER_TEMP/original-reader/bin/python" -B tools/convert_frozen_rotor_native_h5.py \
+            --mesh-directory "$RUNNER_TEMP/frozen-original-sources" \
+            --output-directory "$RUNNER_TEMP/frozen-native-original"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Merge, couple, inspect and execute the actual original MRF case
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$(command -v python)"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-original-native-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 1230s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_original.py \
+            --converted-mesh-directory "$RUNNER_TEMP/frozen-native-original" \
+            --output-directory "$RUNNER_TEMP/frozen-openfoam-case" \
+            --pressure-reference-absolute-pa 300000
+      - name: Independently admit numerical baseline evidence
+        run: python -B tools/frozen_rotor_native_reduction.py --execution-directory "$RUNNER_TEMP/frozen-openfoam-case"
+      - name: Package only the actual accepted native data
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp resources/EXAMPLE_DATA_LICENSE.txt "$RUNNER_TEMP/frozen-openfoam-case/EXAMPLE_DATA_LICENSE.txt"
+          python -B tools/build_native_pump_package.py --execution-directory "$RUNNER_TEMP/frozen-openfoam-case"
+      - name: Retain actual reports and immutable native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-original-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frozen-native-original/native-conversion.json
+            ${{ runner.temp }}/frozen-openfoam-case/*.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.zip
+            ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
+          if-no-files-found: error
+          retention-days: 1

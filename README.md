@@ -294,3 +294,41 @@ storage and 32 MiB per native branch log. These are trial resource budgets,
 not GitHub or OpenFOAM licence requirements. Actual failures and incomplete
 evidence remain visible in retained reports. No native Stage4 campaign has yet
 been dispatched because the prerequisite full-pump mesh/MRF is not qualified.
+
+### Actual lighter candidate and independent original-volume lane
+
+Run [38167255453](https://github.com/simcalc/PyAnsys/actions/runs/38167255453)
+generated **405,636 impeller + 63,598 volute = 469,234 tetrahedra** in
+139.87 seconds. The native optimiser left five exact duplicate impeller
+connectivities. The native volume-only duplicate operation removed those five
+copies after every cell's positive orientation was checked. Every unique cell,
+point, original boundary triangle, winding and source zone remained unchanged.
+The actual 17-digit files passed independent positive-volume and boundary
+identity checks. Nevertheless, `gmshToFoam` created positive unassigned
+`defaultFaces`, and the independent native admission rejected the mesh.
+**This is not an accepted CFD mesh or a completed MRF simulation.**
+
+The separate manual `Frozen Rotor original polygon volume MRF baseline`
+workflow converts the two immutable official HDF5 volumes directly into
+OpenFOAM polygon topology. It retains every original cell and node, preserves
+polygon connectivity, and explicitly transfers Fluent c0 winding into the
+OpenFOAM owner/neighbour convention. Every cell's closure, positive volume,
+source boundary volume, original IDs, coordinate round trips and file hashes
+are checked. Native `checkMesh`, NCC interface coverage and actual numerical
+baseline qualification are still mandatory independent gates.
+
+This route uses the original **1,141,763 cells**, so it does not establish the
+lighter mesh milestone or compatibility with the Ansys Student mesh limit.
+It uses FREE OpenFOAM on the standard public GitHub runner. One metre per
+native coordinate unit is an explicit classroom assumption, not a verified
+manufacturer dimension. Water, 1450 rpm, 90 kg/s and **300,000 Pa** absolute
+inlet reference are declared before execution. Native kinematic pressure is
+converted to absolute pressure once using that bound reference.
+
+The independent original-volume trial budget is one CPU, 4 GiB memory,
+1200 seconds native execution and a 1 GiB working case. Its downstream
+archive retains the existing **128 MiB ZIP** and **512 MiB extracted-data**
+bounds; excluded component copies are not sent downstream. Execution facts,
+preliminary numerical qualification, physical validation, NPSH3 and actual
+restart remain separate claims. Neither this workflow nor the lighter-mesh
+trial changes Main, its database, its engineering locks or local ports.

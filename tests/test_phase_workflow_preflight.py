@@ -31,6 +31,15 @@ class AdmissionContracts(unittest.TestCase):
         self.assertFalse(result['actualCfdRunVerified'])
         self.assertFalse(result['mainApplicationWrites'])
 
+    def test_exact_original_polygon_lane_has_its_own_bound_artifact_name(self):
+        run, artifacts = self.fixture()
+        run['path'] = '.github/workflows/original-frozen-rotor.yml'
+        with self.assertRaises(ValueError):tool.validate_source(self.inputs(),run,artifacts)
+        artifacts['artifacts'][0]['name'] = 'frozen-rotor-original-123456789'
+        result=tool.validate_source(self.inputs(),run,artifacts)
+        self.assertEqual(result['artifactName'],'frozen-rotor-original-123456789')
+        self.assertFalse(result['sourceBaselineQualified'])
+
     def test_untrusted_input_values_and_physical_time_bounds_rejected(self):
         for field, value in [('BASELINE_RUN_ID', '../Main'), ('BASELINE_RUN_ID', '0'),
                              ('PHASE_MODE', 'run arbitrary'), ('PRESSURE_ABSOLUTE_PA', 'nan'),

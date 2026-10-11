@@ -86,12 +86,14 @@ def inspect_manifest(value, zip_size):
     require(isinstance(archive, dict) and set(archive) == {"name", "bytes", "sha256"} and archive.get("name") == package.ARCHIVE
             and positive_int(archive.get("bytes"), package.MAX_ZIP) and archive["bytes"] == zip_size and digest(archive.get("sha256")),
             "The actual bounded ZIP bytes and SHA256 must match its external manifest.")
-    require(value.get("limits") == {"workspaceBytes": package.MAX_WORKSPACE, "fileBytes": package.MAX_FILE,
+    original = value.get("executionStatus") == "ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED"
+    workspace_limit = package.ORIGINAL_WORKSPACE if original else package.MAX_WORKSPACE
+    require(value.get("limits") == {"workspaceBytes": workspace_limit, "fileBytes": package.MAX_FILE,
                                    "archiveBytes": package.MAX_ZIP, "entries": package.MAX_ENTRIES}, "Do not loosen the native package resource limits.")
     require(value.get("simulationExecuted") is True and value.get("actualCfdRunVerified") is True
             and value.get("preliminaryBaselineQualified") is True and type(value.get("qualifiedBaseline")) is bool
             and value.get("restartVerified") is False and value.get("physicalValidationVerified") is False
-            and value.get("executionStatus") == "MRF_EXECUTED_ACCEPTANCE_REQUIRED", "An archive alone cannot qualify a baseline; consume actual execution and separate preliminary numerical qualification only.")
+            and value.get("executionStatus") == ("ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED" if original else "MRF_EXECUTED_ACCEPTANCE_REQUIRED"), "An archive alone cannot qualify a baseline; consume actual execution and separate preliminary numerical qualification only.")
     require(isinstance(value.get("preliminaryQualificationScope"), str) and 0 < len(value["preliminaryQualificationScope"]) <= 1000,
             "Preserve the explicit upstream preliminary numerical scope.")
     rows = value.get("files")
@@ -106,9 +108,10 @@ def inspect_manifest(value, zip_size):
             require(row["bytes"] <= package.MAX_REPORT, "Native JSON reports cannot exceed 128 KiB.")
         names.append(row["path"]); total += row["bytes"]
         require(total <= package.MAX_WORKSPACE, "Uncompressed native evidence exceeds 512 MiB.")
-    require(names == sorted(names) and package.REQUIRED_COMPLETED | package.REQUIRED_INPUTS <= set(names), "The exact sorted inventory must include all bound reports, authored inputs, native mesh and final fields.")
+    required = package.ORIGINAL_COMPLETED | package.ORIGINAL_INPUTS if original else package.REQUIRED_COMPLETED | package.REQUIRED_INPUTS
+    require(names == sorted(names) and required <= set(names), "The exact sorted inventory must include all bound reports, authored inputs, native mesh and final fields.")
     require(type(value.get("archivedBytes")) is int and value["archivedBytes"] == total
-            and positive_int(value.get("inputWorkspaceBytes"), package.MAX_WORKSPACE) and value["inputWorkspaceBytes"] >= total
+            and positive_int(value.get("inputWorkspaceBytes"), workspace_limit) and value["inputWorkspaceBytes"] >= total
             and value.get("missingOptionalEvidence") == [], "Package byte totals and completed evidence coverage must be exact.")
     excluded = value.get("excludedDuplicates")
     require(isinstance(excluded, list) and len(excluded) <= package.MAX_SCAN_ENTRIES and all(isinstance(name, str) for name in excluded)
@@ -189,7 +192,10 @@ def unpack_package(zip_path, manifest_path, output_directory):
                     if report is not None:
                         reports[row["path"]] = report
                 execution, reduction = reports["openfoam-execution.json"], reports["native-baseline-reduction.json"]
-                require(execution.get("schemaVersion") == "untirta.frozen-rotor-openfoam-execution.v1"
+                original = reports["openfoam-preparation.json"].get("schemaVersion") == package.ORIGINAL_PREPARATION
+                expected_schema = package.ORIGINAL_EXECUTION if original else "untirta.frozen-rotor-openfoam-execution.v1"
+                expected_status = "ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED" if original else "MRF_EXECUTED_ACCEPTANCE_REQUIRED"
+                require(execution.get("schemaVersion") == expected_schema and manifest["executionStatus"] == expected_status
                         and reduction.get("schemaVersion") == "untirta.frozen-rotor-native-baseline-reduction.v1"
                         and reduction.get("status") == "PreliminaryBaselineQualified" and reduction.get("qualifiedBaseline") is True
                         and reduction.get("actualCfdRunVerified") is True and reduction.get("mainApplicationWrites") is False

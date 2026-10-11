@@ -18,6 +18,7 @@ import frozen_rotor_openfoam_case as case_tool
 import frozen_rotor_research_protocol as protocol
 
 SCHEMA = "untirta.frozen-rotor-native-input-manifest.v1"
+ORIGINAL_PREPARATION_SCHEMA = "untirta.frozen-rotor-original-openfoam-preparation.v1"
 MAX_RECORD = 128 * 1024
 MAX_DATA = 4 * 1024**2
 MAX_FIELD = 128 * 1024**2
@@ -149,6 +150,11 @@ def build_manifest(execution_directory):
     """Return {study, manifest}; caller persists it before foamRun. No file writes."""
     root = case_tool.regular_directory(execution_directory)
     preparation, preparation_row = record(root, "openfoam-preparation.json")
+    if preparation.get("schemaVersion") == ORIGINAL_PREPARATION_SCHEMA:
+        # The original polygon volume has a distinct reviewed provenance adapter.
+        # Never represent its four native commands as the tetra converter route.
+        import frozen_rotor_original_reduction as original
+        return original.build_manifest(root)
     require(preparation.get("schemaVersion") == case_tool.SCHEMA and preparation.get("exampleDataCommit") == case_tool.inventory.PIN
             and protocol.digest(preparation.get("remeshReportSha256")), "CFD_SOURCE_PINNED_PREPARATION_REQUIRED")
     invariant = extract_invariant_inputs(preparation)
@@ -335,14 +341,25 @@ def reduce_native_baseline(execution_directory, study=None):
         study = native_study
         output.update(study=study, inputManifest=manifest, manifest=manifest)
         execution, execution_row = record(root, "openfoam-execution.json")
-        require(execution.get("schemaVersion") == "untirta.frozen-rotor-openfoam-execution.v1" and
-                execution.get("status") == "MRF_EXECUTED_ACCEPTANCE_REQUIRED" and execution.get("actualCfdRunVerified") is True
+        preparation = record(root, "openfoam-preparation.json")[0]
+        original_route = preparation.get("schemaVersion") == ORIGINAL_PREPARATION_SCHEMA
+        execution_schema = ("untirta.frozen-rotor-original-openfoam-execution.v1" if original_route else
+                            "untirta.frozen-rotor-openfoam-execution.v1")
+        execution_status = "ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED" if original_route else "MRF_EXECUTED_ACCEPTANCE_REQUIRED"
+        require(execution.get("schemaVersion") == execution_schema and
+                execution.get("status") == execution_status and execution.get("actualCfdRunVerified") is True
                 and execution.get("simulationExecuted") is True and execution.get("openFoamConversionVerified") is True
                 and execution.get("nativeGeometryQualityVerified") is True and execution.get("physicalWallTypesVerified") is True
                 and execution.get("mainApplicationWrites") is False and
                 execution.get("preparationReportSha256") == manifest["preparationReportSha256"], "CFD_ACTUAL_NATIVE_EXECUTION_REQUIRED")
+        if original_route:
+            require(manifest.get("sourceGeometryRoute") == "original-volume-polyMesh-transfer" and
+                    execution.get("nativeConversionReportSha256") == manifest.get("nativeConversionReportSha256") and
+                    all(execution.get(key) is True for key in ("nativeSolverCompleted", "finiteNativeFieldsVerified", "inputArtifactsImmutable")),
+                    "CFD_ORIGINAL_NATIVE_COMPLETION_BINDING_REQUIRED")
         stages = execution.get("stages", [])
-        expected = ["gmshToFoam", "changeDictionary", "gmshToFoam", "changeDictionary", "mergeMeshes", "createNonConformalCouples", "checkMesh", "foamRun"]
+        expected = (["mergeMeshes", "createNonConformalCouples", "checkMesh", "foamRun"] if original_route else
+                    ["gmshToFoam", "changeDictionary", "gmshToFoam", "changeDictionary", "mergeMeshes", "createNonConformalCouples", "checkMesh", "foamRun"])
         require([row.get("program") for row in stages] == expected and all(row.get("exitCode") == 0 for row in stages), "CFD_COMPLETE_NATIVE_EXECUTION_STAGES_REQUIRED")
         records, logs = [manifest_row, execution_row], {}
         for index, row in enumerate(stages):

@@ -11,6 +11,10 @@ from pathlib import Path
 import re
 
 REPOSITORY = 'simcalc/PyAnsys'
+SOURCE_WORKFLOWS = {
+    '.github/workflows/remesh-frozen-rotor.yml': 'frozen-rotor-remesh-',
+    '.github/workflows/original-frozen-rotor.yml': 'frozen-rotor-original-',
+}
 # One source artifact retains the bounded native ZIP (128 MiB), separate mesh
 # candidates (128 MiB), at most eight 4 MiB logs and small identity reports.
 # This outer download limit does not alter the unpacker's 128 MiB ZIP limit.
@@ -45,12 +49,12 @@ def validate_source(inputs, run, artifact_listing):
     head_repository = run.get('head_repository', {})
     if (str(run.get('id')) != run_id or run.get('status') != 'completed'
             or run.get('conclusion') != 'success' or run.get('event') != 'workflow_dispatch'
-            or run.get('path') != '.github/workflows/remesh-frozen-rotor.yml'
+            or run.get('path') not in SOURCE_WORKFLOWS
             or not re.fullmatch(r'[0-9a-f]{40}', run.get('head_sha', ''))
             or any(row.get('full_name') != REPOSITORY or row.get('private') is not False
                    for row in (repository, head_repository))):
         raise ValueError('Require the actual completed manual volume/MRF workflow from the exact public repository.')
-    expected = 'frozen-rotor-remesh-' + run_id
+    expected = SOURCE_WORKFLOWS[run['path']] + run_id
     matches = [row for row in artifact_listing.get('artifacts', []) if row.get('name') == expected]
     if len(matches) != 1:
         raise ValueError('One exact retained native evidence artifact is required.')
@@ -59,7 +63,7 @@ def validate_source(inputs, run, artifact_listing):
     if (row.get('expired') is not False or isinstance(size, bool) or not isinstance(size, int)
             or not 0 < size <= MAX_ARTIFACT_BYTES or str(row.get('workflow_run', {}).get('id')) != run_id):
         raise ValueError('The source artifact must be unexpired, bounded and bound to the same actual run.')
-    return {**inputs, 'artifactName': expected, 'sourceCommit': run['head_sha'],
+    return {**inputs, 'artifactName': expected, 'sourceWorkflow': run['path'], 'sourceCommit': run['head_sha'],
             'artifactBytes': size, 'sourceBaselineQualified': False,
             'claimBoundary': 'Source admission only; native ZIP byte verification and numerical baseline qualification remain mandatory.'}
 

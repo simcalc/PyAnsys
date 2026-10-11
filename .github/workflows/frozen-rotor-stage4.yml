@@ -57,8 +57,10 @@ jobs:
           set -euo pipefail
           gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
           gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID/artifacts" > "$RUNNER_TEMP/source-artifacts.json"
-          python -B tools/stage4_workflow_preflight.py --run-json "$RUNNER_TEMP/source-run.json" --artifacts-json "$RUNNER_TEMP/source-artifacts.json"
-          gh run download "$BASELINE_RUN_ID" --repo simcalc/PyAnsys --name "frozen-rotor-remesh-$BASELINE_RUN_ID" --dir "$RUNNER_TEMP/source-artifact"
+          python -B tools/stage4_workflow_preflight.py --run-json "$RUNNER_TEMP/source-run.json" --artifacts-json "$RUNNER_TEMP/source-artifacts.json" > "$RUNNER_TEMP/source-admission.json"
+          cat "$RUNNER_TEMP/source-admission.json"
+          artifact_name="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifactName"])' "$RUNNER_TEMP/source-admission.json")"
+          gh run download "$BASELINE_RUN_ID" --repo simcalc/PyAnsys --name "$artifact_name" --dir "$RUNNER_TEMP/source-artifact"
       - name: Install checksum-pinned OpenFOAM Foundation 12
         run: bash tools/install_openfoam12.sh
       - name: Verify transferred native bytes and baseline qualification

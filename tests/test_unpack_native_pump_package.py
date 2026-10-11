@@ -21,9 +21,26 @@ unpack = module("unpack_native_fixture_tests", BASE / "tools/unpack_native_pump_
 fixture_module = module("unpack_native_parser_fixture", BASE / "tests/test_frozen_native_reduction.py")
 native = fixture_module.native
 package = unpack.package
+package_fixtures = module("original_package_transport_fixture", BASE / "tests/test_native_pump_package.py")
 
 
 class UnpackNativeContracts(unittest.TestCase):
+    def test_original_transfer_schema_and_polygon_maps_reach_independent_review(self):
+        # Transport-only synthetic checksum fixture. Native engineering review
+        # is explicitly mocked, never interpreted as actual CFD qualification.
+        with tempfile.TemporaryDirectory() as temp:
+            parent=Path(temp);builder=package_fixtures.NativePackageContracts()
+            source=builder.original_fixture(parent);builder.preliminary(source)
+            builder.build(source,parent)
+            target=parent/'original-transfer'
+            with patch.object(unpack.phase,'verify_emitted_baseline') as review:
+                result=self.unpack(source,target,parent)
+            review.assert_called_once()
+            self.assertTrue(result['preliminaryBaselineQualified'])
+            self.assertFalse(result['physicalValidationVerified'])
+            self.assertEqual((target/'volute-case/sourceFaceIds').read_bytes(),(source/'volute-case/sourceFaceIds').read_bytes())
+            self.assertFalse((target/'remesh-report.json').exists())
+
     def fixture(self, parent):
         source = parent / "source-execution"
         source.mkdir()

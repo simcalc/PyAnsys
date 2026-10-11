@@ -90,6 +90,44 @@ class NativePackageContracts(unittest.TestCase):
             self.assertTrue(manifest["missingOptionalEvidence"])
             self.assertEqual(manifest["executionStatus"], "NATIVE_STAGE_CORRECTION_REQUIRED")
 
+    def original_fixture(self,parent):
+        root=self.fixture(parent)
+        (root/'remesh-report.json').unlink()
+        (root/'impeller-case/system/changeDictionaryDict').unlink()
+        self.write(root,'native-conversion.json',package.canonical({'syntheticFixture':True,'researchEvidence':False}))
+        for component in ('impeller','volute'):
+            self.write(root,component+'-case/sourceFaceIds','FoamFile {format ascii; class labelList; object sourceFaceIds;}\n1\n(1)\n')
+        self.write(root,'openfoam-preparation.json',package.canonical({'schemaVersion':package.ORIGINAL_PREPARATION,
+                    'exampleDataCommit':package.PIN,'mainApplicationWrites':False,'syntheticFixture':True}))
+        self.write(root,'openfoam-execution.json',package.canonical({'schemaVersion':package.ORIGINAL_EXECUTION,
+                    'status':'ORIGINAL_MRF_EXECUTED_ACCEPTANCE_REQUIRED','simulationExecuted':True,'actualCfdRunVerified':True,
+                    'qualifiedBaseline':False,'mainApplicationWrites':False,'syntheticFixture':True}))
+        return root
+
+    def test_original_lane_preserves_polygon_maps_without_inventing_remesh_report(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent=Path(temp);root=self.original_fixture(parent)
+            result=self.build(root,parent)
+            manifest=json.loads((root/package.MANIFEST).read_bytes())
+            with ZipFile(root/package.ARCHIVE) as bundle:
+                self.assertNotIn('remesh-report.json',bundle.namelist())
+                self.assertIn('native-conversion.json',bundle.namelist())
+                self.assertIn('volute-case/sourceFaceIds',bundle.namelist())
+            self.assertFalse(result['preliminaryBaselineQualified'])
+            self.assertEqual(manifest['missingOptionalEvidence'],[])
+            self.assertEqual(manifest['limits']['workspaceBytes'],package.ORIGINAL_WORKSPACE)
+
+    def test_original_lane_requires_exact_schema_pair_and_both_source_maps(self):
+        for changed in ('schema','impeller-case/sourceFaceIds','volute-case/sourceFaceIds','native-conversion.json'):
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temp:
+                parent=Path(temp);root=self.original_fixture(parent)
+                if changed=='schema':
+                    value=json.loads((root/'openfoam-execution.json').read_bytes())
+                    value['schemaVersion']='untirta.frozen-rotor-openfoam-execution.v1'
+                    self.write(root,'openfoam-execution.json',package.canonical(value))
+                else:(root/changed).unlink()
+                with self.assertRaises(package.PackageIssue):self.build(root,parent)
+
     def test_existing_evidence_is_never_overwritten(self):
         for output in (package.ARCHIVE, package.MANIFEST):
             with tempfile.TemporaryDirectory() as temp:
