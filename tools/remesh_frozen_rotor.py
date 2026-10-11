@@ -179,12 +179,15 @@ def checkpoint(progress, stage):
              "surfaceZoneBindings": progress.get("surfaceZoneBindings", []),
              "verifiedSources": progress.get("verifiedSources", []), "gmshAlgorithm3D": GMSH_ALGORITHM_3D,
              "optimisation": optimisation_metadata(progress.get("optimisationMode", "full")),
+             "generatedVolumeDiagnostics": progress.get("generatedVolumeDiagnostics"),
              "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
     persist_json(progress["destination"], "remesh-progress.json", value)
 
 
 def gmsh_diagnostic(gmsh, progress):
     result = {"surfaceZoneBindings": progress.get("surfaceZoneBindings", []), "lastEntityErrors": [], "loggerTail": []}
+    if progress.get("generatedVolumeDiagnostics") is not None:
+        result["generatedVolumeDiagnostics"] = progress["generatedVolumeDiagnostics"]
     if gmsh is not None and gmsh.isInitialized():
         try:
             result["lastEntityErrors"] = [[int(dim), int(tag)] for dim, tag in gmsh.model.mesh.getLastEntityError()[:16]]
@@ -232,6 +235,85 @@ def sizing(box):
     if not math.isfinite(length) or length <= 0 or min(extents) <= 0:
         raise RemeshIssue("A finite three-dimensional source bounding box is required.")
     return length / SIZING_DIVISOR
+
+
+def finite_statistics(values, expected_count):
+    """Bounded measured aggregates only; invalid values never become a pass."""
+    result = {"expectedValueCount": expected_count, "returnedValueCount": 0, "finiteValueCount": 0,
+              "nonFiniteCount": 0, "negativeCount": 0, "zeroCount": 0, "nonPositiveCount": 0,
+              "minimum": None, "maximum": None}
+    for value in values:
+        value = float(value)
+        result["returnedValueCount"] += 1
+        if not math.isfinite(value):
+            result["nonFiniteCount"] += 1
+            continue
+        result["finiteValueCount"] += 1
+        result["negativeCount"] += int(value < 0)
+        result["zeroCount"] += int(value == 0)
+        result["nonPositiveCount"] += int(value <= 0)
+        result["minimum"] = value if result["minimum"] is None else min(result["minimum"], value)
+        result["maximum"] = value if result["maximum"] is None else max(result["maximum"], value)
+    return result
+
+
+def measured_quality_diagnostics(gmsh, cell_tags):
+    result = {}
+    for quantity in ("minSICN", "minDetJac", "volume"):
+        try:
+            result[quantity] = finite_statistics(gmsh.model.mesh.getElementQualities(cell_tags, quantity), len(cell_tags))
+        except RemeshIssue:
+            raise  # Preserve the fixed native runtime deadline and safety gates.
+        except Exception as error:
+            result[quantity] = {"expectedValueCount": len(cell_tags), "captureIssue": type(error).__name__}
+    return result
+
+
+def tetra_coordinate_diagnostics(cells, points):
+    """Inspect every exported tetrahedron without storing/publishing cell arrays."""
+    result = {"exportedTetrahedronCount": len(cells), "coordinateNodeCount": len(points), "invalidCellNodeCount": 0,
+              "nonFiniteCoordinateNodeCount": 0, "coordinateBoundsNativeUnits": {},
+              "signedDeterminant": finite_statistics([], len(cells)),
+              "absoluteDeterminantOverMaxOriginEdgeCubed": finite_statistics([], len(cells)),
+              "smallScaleRelativeDeterminantThreshold": 1e-12, "smallScaleRelativeDeterminantCount": 0,
+              "smallScaleRelativeDeterminantIsDiagnosticOnly": True,
+              "claimBoundary": "Measured exported ordering and coordinate diagnostics, not a repaired mesh or CFD acceptance; native coordinate units remain unverified."}
+    for point in points.values():
+        if len(point) != 3 or not all(math.isfinite(value) for value in point):
+            result["nonFiniteCoordinateNodeCount"] += 1
+            continue
+        for axis, value in zip(("x", "y", "z"), point):
+            bounds = result["coordinateBoundsNativeUnits"].setdefault(axis, {"minimum": value, "maximum": value})
+            bounds["minimum"], bounds["maximum"] = min(bounds["minimum"], value), max(bounds["maximum"], value)
+    def determinants():
+        for cell in cells:
+            if len(cell) != 4 or len(set(cell)) != 4 or any(node not in points or len(points[node]) != 3 for node in cell):
+                result["invalidCellNodeCount"] += 1
+                yield math.nan
+                continue
+            a, b, c, d = [points[node] for node in cell]
+            ab, ac, ad = boundary._sub(b, a), boundary._sub(c, a), boundary._sub(d, a)
+            determinant = boundary._dot(ab, boundary._cross(ac, ad))
+            yield determinant
+    result["signedDeterminant"] = finite_statistics(determinants(), len(cells))
+    def scaled():
+        for cell in cells:
+            if len(cell) != 4 or len(set(cell)) != 4 or any(node not in points or len(points[node]) != 3 for node in cell):
+                yield math.nan
+                continue
+            a, b, c, d = [points[node] for node in cell]
+            ab, ac, ad = boundary._sub(b, a), boundary._sub(c, a), boundary._sub(d, a)
+            determinant = boundary._dot(ab, boundary._cross(ac, ad))
+            edge = max(math.hypot(*ab), math.hypot(*ac), math.hypot(*ad))
+            try:
+                normalized = abs(determinant)/(edge**3) if edge > 0 and math.isfinite(edge) and math.isfinite(determinant) else math.nan
+            except (OverflowError, ZeroDivisionError):
+                normalized = math.nan
+            if math.isfinite(normalized) and normalized <= result["smallScaleRelativeDeterminantThreshold"]:
+                result["smallScaleRelativeDeterminantCount"] += 1
+            yield normalized
+    result["absoluteDeterminantOverMaxOriginEdgeCubed"] = finite_statistics(scaled(), len(cells))
+    return result
 
 
 def tetra_metrics(cells, points):
@@ -329,6 +411,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     component = name.split(".")[0]
     progress["component"] = component
     progress["surfaceZoneBindings"] = []
+    progress.pop("generatedVolumeDiagnostics", None)
     checkpoint(progress, "native-boundary-validation")
     zones, owners, native_audit = source_triangles(model)
     used = sorted({node for triangle in owners for node in triangle})
@@ -375,18 +458,30 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         raise RemeshIssue("Generated node count exceeds the fixed classroom budget or has an invalid coordinate shape.")
     points = {int(tag): tuple(float(value) for value in coordinates[i*3:i*3+3]) for i, tag in enumerate(node_tags)}
     types, tag_sets, node_sets = gmsh.model.mesh.getElements(3, volume)
+    progress["generatedVolumeDiagnostics"] = {
+        "sourceMesh": name, "exportedNodeTagCount": len(node_tags), "uniqueExportedNodeCount": len(points),
+        "exportedVolumeElementTypes": [int(kind) for kind in types[:8]],
+        "exportedVolumeElementCount": sum(len(tags) for tags in tag_sets),
+        "exportedVolumeConnectivityEntryCount": sum(len(nodes) for nodes in node_sets),
+        "countBasis": "Actual Gmsh getElements(3, volume) exported elements; native HXT internal counters and all-dimensional log summaries are different quantities.",
+        "qualityAndBoundaryGatesPassed": False}
+    checkpoint(progress, "exported-volume-count-diagnostics")
     if len(types) != 1 or int(types[0]) != 4 or len(node_sets[0]) != 4*len(tag_sets[0]):
         raise RemeshIssue("A nonempty linear tetrahedral volume mesh is required.")
     if not 1 <= len(tag_sets[0]) <= MAX_NEW_CELLS_PER_COMPONENT:
         raise RemeshIssue("The tetra-fill exceeds the fixed per-component cell budget.")
     tags = [int(tag) for tag in tag_sets[0]]
     cells = [tuple(int(node) for node in node_sets[0][i:i+4]) for i in range(0, len(node_sets[0]), 4)]
+    progress["generatedVolumeDiagnostics"]["tetraCoordinateAndDeterminant"] = tetra_coordinate_diagnostics(cells, points)
+    progress["generatedVolumeDiagnostics"]["nativeQualityMetrics"] = measured_quality_diagnostics(gmsh, tags)
+    checkpoint(progress, "measured-volume-quality-diagnostics")
     checkpoint(progress, "quality-and-preserved-boundary-equality")
     metrics, quality = tetra_metrics(cells, points), _quality(gmsh, tags)
     final_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
     final_groups, final_boundary_audit = preserved_boundary(final_surfaces, owners, originals, native_points, points)
     if final_groups != groups:
         raise RemeshIssue("Volume fill must retain the same exact source-zone surface entities.")
+    progress["generatedVolumeDiagnostics"]["qualityAndBoundaryGatesPassed"] = True
     if len(cells) >= model["nativeCounts"]["cellCount"]:
         raise RemeshIssue("The classroom candidate must contain fewer volume cells than its native source component.")
     boundary_rows = []
@@ -618,7 +713,8 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
         "optimisation":optimisation,
         "attemptMode":"native-boundary-preserved-tetra-fill","status":"PREPARATION_REQUIRED","reasonCode":reason,
         "diagnostic":{"stage":progress.get("stage","worker-startup"),"component":progress.get("component"),
-            "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[])},
+            "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[]),
+            "generatedVolumeDiagnostics":progress.get("generatedVolumeDiagnostics")},
         "progressJournal":progress.get("journal",[]),"sources":sources,"postAttemptSourceVerification":checks,
         "originalMeshesImmutable":all(row["immutableVerified"] for row in checks),"elapsedSeconds":round(elapsed,3),
         "limits":{"threads":1,"maximumSeconds":MAX_SECONDS,"maximumAddressSpaceBytes":MAX_MEMORY_BYTES,"maximumOutputBytes":MAX_OUTPUT_BYTES},

@@ -102,6 +102,50 @@ class RemeshContracts(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(remesh.RemeshIssue):
                 remesh._quality(Gmsh(),[1])
 
+    def test_measured_native_quality_keeps_all_metric_counts_before_first_gate_rejects(self):
+        class Mesh:
+            calls=[]
+            def getElementQualities(self,tags,quantity):
+                self.calls.append(quantity)
+                return {"minSICN":[.5,-.01,0,float("nan")], "minDetJac":[1,2,3,4], "volume":[.1,.2,.3,.4]}[quantity]
+        gmsh=SimpleNamespace(model=SimpleNamespace(mesh=Mesh()))
+        observed=remesh.measured_quality_diagnostics(gmsh,[1,2,3,4])
+        self.assertEqual(gmsh.model.mesh.calls,["minSICN","minDetJac","volume"])
+        sicn=observed["minSICN"]
+        self.assertEqual((sicn["minimum"],sicn["maximum"]),(-.01,.5))
+        self.assertEqual((sicn["returnedValueCount"],sicn["finiteValueCount"],sicn["nonFiniteCount"],sicn["nonPositiveCount"]),(4,3,1,2))
+        self.assertEqual((sicn["negativeCount"],sicn["zeroCount"]),(1,1))
+        self.assertEqual(observed["minDetJac"]["nonPositiveCount"],0)
+        self.assertEqual(observed["volume"]["minimum"],.1)
+        json.dumps(observed,allow_nan=False)
+        with self.assertRaisesRegex(remesh.RemeshIssue,"minSICN"):
+            remesh._quality(gmsh,[1,2,3,4])
+        self.assertEqual(remesh.finite_statistics([float("inf"),float("nan")],2)["minimum"],None)
+        with patch.object(gmsh.model.mesh,"getElementQualities",side_effect=remesh.RemeshIssue("Synthetic deadline")),\
+             self.assertRaisesRegex(remesh.RemeshIssue,"deadline"):
+            remesh.measured_quality_diagnostics(gmsh,[1])
+
+    def test_tetra_diagnostic_distinguishes_global_sign_bad_cells_and_small_relative_volume(self):
+        positive=remesh.tetra_coordinate_diagnostics([(1,2,3,4)],POINTS)
+        negative=remesh.tetra_coordinate_diagnostics([(1,3,2,4)],POINTS)
+        self.assertEqual(positive["signedDeterminant"]["negativeCount"],0)
+        self.assertEqual(negative["signedDeterminant"]["negativeCount"],1)
+        self.assertEqual(negative["signedDeterminant"]["minimum"],-1)
+        self.assertEqual(positive["coordinateBoundsNativeUnits"]["z"],{"minimum":0.,"maximum":1.})
+        points={**POINTS,5:(0.,0.,1e-14),6:(.1,.1,0.),7:(float("inf"),0.,1.)}
+        observed=remesh.tetra_coordinate_diagnostics([(1,2,3,4),(1,2,3,5),(1,2,3,6),(1,2,3,7),(1,2,3,99)],points)
+        self.assertEqual(observed["exportedTetrahedronCount"],5)
+        self.assertEqual(observed["signedDeterminant"]["zeroCount"],1)
+        self.assertEqual(observed["signedDeterminant"]["nonFiniteCount"],2)
+        self.assertEqual(observed["nonFiniteCoordinateNodeCount"],1)
+        self.assertEqual(observed["invalidCellNodeCount"],1)
+        self.assertEqual(observed["smallScaleRelativeDeterminantCount"],2)
+        self.assertTrue(observed["smallScaleRelativeDeterminantIsDiagnosticOnly"])
+        json.dumps(observed,allow_nan=False)
+        self.assertNotIn("cells",observed)
+        with self.assertRaisesRegex(remesh.RemeshIssue,"signed determinants"):
+            remesh.tetra_metrics([(1,3,2,4)],POINTS)
+
     def test_failed_runtime_persists_report_only_without_solver_or_mesh_claims(self):
         with TemporaryDirectory() as root, patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
             target=Path(root)/"new"/"remesh"
@@ -145,6 +189,9 @@ class RemeshContracts(unittest.TestCase):
         def failed_fill(model,name,destination,gmsh,np,progress):
             (destination/"impeller.msh").write_bytes(b"Invalid partial mesh must be removed")
             progress["stage"]="fixed-boundary-tetrahedral-fill"
+            progress["generatedVolumeDiagnostics"]={"sourceMesh":name,"exportedVolumeElementCount":5,
+                "tetraCoordinateAndDeterminant":{"signedDeterminant":{"negativeCount":1}},
+                "nativeQualityMetrics":{"minSICN":{"nonPositiveCount":1}},"qualityAndBoundaryGatesPassed":False}
             raise remesh.RemeshIssue("Synthetic fill failure")
         with TemporaryDirectory() as root, patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False),patch.dict(sys.modules,{"gmsh":native}):
             target=Path(root)/"new-remesh"
@@ -159,6 +206,9 @@ class RemeshContracts(unittest.TestCase):
             self.assertEqual(checksum.call_count,4)
             self.assertEqual(len(report["postAttemptSourceVerification"]),2)
             self.assertEqual(report["diagnostic"]["loggerTail"],["Synthetic meshing diagnostic"])
+            measured=report["diagnostic"]["generatedVolumeDiagnostics"]
+            self.assertEqual(measured["exportedVolumeElementCount"],5)
+            self.assertEqual(measured["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
 
     def test_hxt_is_fixed_and_child_environment_keeps_runner_identity_without_secrets(self):
         self.assertEqual(remesh.GMSH_ALGORITHM_3D,10)
@@ -224,6 +274,12 @@ class RemeshContracts(unittest.TestCase):
             self.assertEqual(mesh.generated,3)
             self.assertIn("quality-and-preserved-boundary-equality",[call.args[1] for call in checkpoint.call_args_list])
             self.assertFalse((Path(root)/"impeller.msh").exists())
+            measured=progress["generatedVolumeDiagnostics"]
+            self.assertEqual(measured["exportedVolumeElementCount"],1)
+            self.assertEqual(measured["tetraCoordinateAndDeterminant"]["signedDeterminant"]["minimum"],1)
+            self.assertEqual(measured["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
+            self.assertFalse(measured["qualityAndBoundaryGatesPassed"])
+            self.assertIn("measured-volume-quality-diagnostics",[call.args[1] for call in checkpoint.call_args_list])
 
     def test_interrupted_native_worker_report_removes_partial_mesh_and_never_claims_cfd(self):
         with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):

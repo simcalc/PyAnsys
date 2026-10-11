@@ -24,6 +24,7 @@ SCHEMA = "untirta.frozen-rotor-phase-input-manifest.v1"
 REDUCTION_SCHEMA = "untirta.frozen-rotor-phase-native-reduction.v1"
 MODEL_FILES = {"constant/fvModels", "constant/phaseProperties", "constant/physicalProperties.water", "constant/physicalProperties.vapour"}
 MAX_LOG = 8 * 1024**2
+MAX_REDUCTION_BYTES = 16 * 1024**2
 MAX_ROWS = 100_000
 TIME_NAME = r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
 encoded = native.encoded
@@ -503,14 +504,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execution-directory", type=Path, required=True)
     args = parser.parse_args()
-    result = reduce_native_phase(args.execution_directory)
-    root = campaign.base.regular_directory(args.execution_directory)
-    # The pre-execution manifest is verified above and never replaced here.
-    campaign.base.write_exclusive(root / "phase-native-reduction.json", encoded(result))
-    print(json.dumps({"status": result["status"], "actualCfdRunVerified": result["actualCfdRunVerified"],
-                      "phaseObservationQualified": result["phaseObservationQualified"], "npsh3Verified": False,
-                      "report": "phase-native-reduction.json", "mainApplicationWrites": False}, allow_nan=False))
-    return 0 if result["phaseObservationQualified"] else 2
+    try:
+        root = campaign.inside_runner(args.execution_directory)
+        destination = campaign.base.inventory.output_path(root / "phase-native-reduction.json")
+        result = reduce_native_phase(root)
+        raw = encoded(result)
+        require(len(raw) <= MAX_REDUCTION_BYTES, "CFD_BOUNDED_PHASE_REDUCTION_REQUIRED")
+        # The pre-execution manifest is verified above and never replaced here.
+        campaign.base.write_exclusive(destination, raw)
+        print(json.dumps({"status": result["status"], "actualCfdRunVerified": result["actualCfdRunVerified"],
+                          "phaseObservationQualified": result["phaseObservationQualified"], "npsh3Verified": False,
+                          "report": "phase-native-reduction.json", "mainApplicationWrites": False}, allow_nan=False))
+        return 0 if result["phaseObservationQualified"] else 2
+    except (protocol.ProtocolError,campaign.CampaignIssue,campaign.base.CaseIssue,campaign.base.inventory.InspectionIssue,OSError,ValueError) as error:
+        print(json.dumps({"status":"NativePhaseEvidenceRequired","reasonCode":"CFD_PHASE_REDUCTION_OUTPUT_REQUIRED",
+                          "action":str(error)[:500],"actualCfdRunVerified":False,"mainApplicationWrites":False}))
+        return 2
 
 
 if __name__ == "__main__":
