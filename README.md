@@ -308,6 +308,13 @@ identity checks. Nevertheless, `gmshToFoam` created positive unassigned
 `defaultFaces`, and the independent native admission rejected the mesh.
 **This is not an accepted CFD mesh or a completed MRF simulation.**
 
+An independent exact tetra-face audit measured **12 untagged exterior faces**,
+**8 faces with three incident cells**, and **155 internal face pairs with the
+same outward winding**. No original tagged triangle was absent from the exterior.
+The stricter serialized-face gate now rejects these defects before native
+conversion. Positive tetra volumes and complete source tags alone do not prove
+a valid volume topology; no face was added, relabelled or healed to mask them.
+
 The separate manual `Frozen Rotor original polygon volume MRF baseline`
 workflow converts the two immutable official HDF5 volumes directly into
 OpenFOAM polygon topology. It retains every original cell and node, preserves

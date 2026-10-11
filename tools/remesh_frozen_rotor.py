@@ -656,6 +656,13 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     serialization["everyPublishedCellPositiveVolumeVerified"] = True
     serialization["independentSerializedAdmissionReader"] = "frozen_rotor_openfoam_case.msh_inventory"
     serialization["publishedNativeBoundaryIdentity"] = verify_published_boundary(target, zones)
+    import verify_tetra_face_incidence as incidence
+    try:
+        serialization["exactTetraFaceIncidence"] = incidence.verify_msh(target)
+    except incidence.TetraIncidenceIssue as error:
+        progress["actualSerializedFaceIncidence"] = error.report
+        checkpoint(progress, "serialized-tetra-topology-rejected")
+        raise RemeshIssue("Every serialized tetra face must have valid closed incidence, exact source exterior coverage and opposite internal winding.") from error
     result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest.hexdigest(), "format": "gmsh-msh2.2-ascii"},
               "sourceCellCount": model["nativeCounts"]["cellCount"], "sourceNodeCount": model["nativeCounts"]["nodeCount"],
               "generatedCellCount": len(cells), "generatedNodeCount": len(points), "sourceBoundaryAudit": native_audit,
