@@ -493,7 +493,7 @@ boundary layers are disabled for this explicitly staircase approximation. Wall r
 remain unqualified. One source coordinate unit equals one metre by declared
 classroom assumption only. Original volume meshes remain unchanged.
 
-Each component has a 450,000-cell generation/admission cap; the measured
+Each final admitted component has a 450,000-cell cap; the measured
 combined mesh must contain **fewer than 1,000,000 cells**. The serial native
 budget is **900 seconds, one CPU, 4 GiB memory and 1 GiB workspace**. All eleven
 original patch names/types, complete rotating/stationary cell zones, positive
@@ -511,6 +511,10 @@ remain mandatory. Removal of disconnected generated fragments is a declared
 derived-mesh operation, not a change to source surfaces or a quality waiver.
 Only an optional empty background patch may disappear. The complete recipe has
 15 ordered native geometry stages and keeps all full mesh checks unchanged.
+The authored snappy refinement controls also target 450,000 cells, but native
+intermediate refinement can overshoot that target before outside cells are
+removed. Actual intermediate counts are retained; the final-cell admission cap
+and enforced process memory/time/workspace budgets remain separate checks.
 
 This pilot invokes geometry utilities only. It does not invoke `foamRun` or
 admit geometry accuracy, a steady MRF solution, pressure-sweep NPSHr, physical
@@ -537,6 +541,18 @@ count does not by itself identify every geometric cause. Its raw mesh, actual
 failed-cell sets and native logs are retained. No volute, coupled mesh or flow
 solver acceptance follows from that failed impeller. Uniform volume refinement
 and source-seed region selection are a new bounded trial; success is unproven.
+
+Run [38175984353](https://github.com/simcalc/PyAnsys/actions/runs/38175984353)
+passed **585 contract tests**, then generated **121,226 impeller cells** and
+completed native source-seed selection of **121,218 cells** from nine regions.
+Its temporary intermediate refinement peaked at **630,342 cells** before
+outside-cell removal. The Python reader rejected native `cellLevel` written
+as `121226{2}`; full `checkMesh`, the volute and interface were not executed.
+Supporting this exact documented uniform `labelList` syntax fixes a reader
+compatibility defect and does not qualify the mesh or waive native quality.
+The exact format is defined by the pinned Foundation-12
+[list writer](https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/OpenFOAM/containers/Lists/UList/UListIO.C)
+and [list reader](https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/OpenFOAM/containers/Lists/List/ListIO.C).
 
 ### Independent exploratory MRF lane for an admitted approximate mesh
 

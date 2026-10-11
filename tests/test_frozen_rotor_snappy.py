@@ -64,7 +64,7 @@ def fixture_commands(root):
     return runner.commands(root,command_components())
 
 
-def selection_fixture(root,*,tiny_size=.01,seed_cell=0,reverse_internal=False,background=True):
+def selection_fixture(root,*,tiny_size=.01,seed_cell=0,reverse_internal=False,background=True,compact_levels=False):
     """Three synthetic polyhedra; the third is a tiny disconnected tetrahedron."""
     case=mesh(root,background=background);folder=case/"constant/polyMesh"
     selected_bytes={name:(folder/name).read_bytes() for name in runner.SELECTION_FILES}
@@ -75,7 +75,7 @@ def selection_fixture(root,*,tiny_size=.01,seed_cell=0,reverse_internal=False,ba
         "owner":("labelList","11\n(0 0 0 0 1 1 1 2 2 2 2)\n"),
         "boundary":("polyBoundaryMesh",("2" if background else "1")+"\n(\nfixture-wall {type wall; nFaces 10; startFace 1;}\n"+
                     ("backgroundBox {type patch; nFaces 0; startFace 11;}\n" if background else "")+")\n"),
-        "cellZones":("cellZoneList","0\n()\n"),"cellLevel":("labelList","3\n(2 2 2)\n")}
+        "cellZones":("cellZoneList","0\n()\n"),"cellLevel":("labelList","3{2}\n" if compact_levels else "3\n(2 2 2)\n")}
     for name,(kind,body) in values.items():(folder/name).write_text(runner.base.foam_header(name,kind)+body,encoding="ascii")
     raw_rows=runner.snapshot_region_source(root,component())
     for name,raw in selected_bytes.items():(folder/name).write_bytes(raw)
@@ -93,6 +93,36 @@ def selection_fixture(root,*,tiny_size=.01,seed_cell=0,reverse_internal=False,ba
 
 
 class NativeRegionSelectionTests(unittest.TestCase):
+    def test_native_uniform_compact_labels_match_counted_list_and_exact_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/"cellLevel"
+            for body,expected,signed in (("3{2}",[2,2,2],False),("3\n{\n2\n};",[2,2,2],False),
+                                          ("2{-1}",[-1,-1],True),("0()",[],False),("1(2)",[2],False)):
+                with self.subTest(body=body):
+                    path.write_text(runner.base.foam_header("cellLevel","labelList")+body,encoding="ascii")
+                    self.assertEqual(list(runner.selection_labels(path,signed=signed)),expected)
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);_,_,text=selection_fixture(root,compact_levels=True)
+            result=runner.retain_region_selection(root,component(),text)
+            self.assertEqual(result,runner.verify_region_selection(root,component()))
+            self.assertEqual(result["sourceCellLevelHistogram"],{"2":3})
+            self.assertEqual(result["selectedMappedCellLevelHistogram"],{"2":2})
+            self.assertTrue(result["allCellPolygonFanVolumesPositiveVerified"])
+            self.assertFalse(result["meshQualityCheckedBySolver"])
+
+    def test_uniform_and_plain_native_lists_reject_invalid_or_unbounded_storage(self):
+        bodies=("3{2 2}","3{}","0{2}","3{2)","3(2}","3{{2}}","3{2} trailing", "3{2.0}","3{nan}",
+                "3{-2}","2(2)","3000001{2}","3{9223372036854775808}","1(3000001)")
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/"cellLevel"
+            for body in bodies:
+                with self.subTest(body=body):
+                    path.write_text(runner.base.foam_header("cellLevel","labelList")+body,encoding="ascii")
+                    with self.assertRaises(runner.surface.SurfaceCheckIssue):runner.selection_labels(path)
+            for header in (runner.base.foam_header("cellLevel","labelIOList"),runner.base.foam_header("owner","labelList")):
+                path.write_text(header+"3{2}",encoding="ascii")
+                with self.assertRaises(runner.quality_parser.QualityIssue):runner.selection_labels(path)
+
     def test_exact_native_subset_measures_small_disconnected_volume_and_replays(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);case,raw_rows,text=selection_fixture(root)

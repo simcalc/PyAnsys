@@ -231,12 +231,23 @@ def native_zones(path):
 def selection_labels(path,*,signed=False):
     raw=base.read_regular(path,surface.MAX_FILE)
     body=quality_parser.native_body(raw,Path(path).name,{"labelList"})
-    match=re.fullmatch(r"(\d+)\s*\((.*)\)\s*;?",body,re.S)
+    # Foundation-12 UListIO writes a contiguous uniform ASCII list as N{value};
+    # ListIO also reads that exact counted form. Keep it distinct from N(...)
+    # so mismatched delimiters, extra values and unbounded expansion reject.
+    match=re.fullmatch(r"(\d+)\s*(?:\(([^()]*)\)|\{([^{}]*)\})\s*;?",body,re.S)
     require(match,"A complete counted native selection labelList is required.")
-    count=int(match[1]);words=match[2].split()
-    require(count<=3_000_000 and len(words)==count and all(re.fullmatch(r"-?\d+" if signed else r"\d+",word) for word in words),
+    count=int(match[1]);uniform=match[3] is not None
+    require(count<=3_000_000,"A native selection label count exceeds the bounded addressing domain.")
+    words=(match[3] if uniform else match[2]).split()
+    require((count>0 and len(words)==1 if uniform else len(words)==count)
+            and all(re.fullmatch(r"-?\d+" if signed else r"\d+",word) for word in words),
             "Native selection addressing must contain only its exact bounded integer count.")
-    return array("q",map(int,words))
+    values=array("q")
+    for word in words:
+        value=int(word)
+        require(abs(value)<=3_000_000,"A native selection label exceeds the bounded addressing domain.")
+        values.append(value)
+    return values*count if uniform else values
 
 
 def selection_primitives(folder,component):
