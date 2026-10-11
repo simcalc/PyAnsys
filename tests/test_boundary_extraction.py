@@ -228,7 +228,7 @@ class NativeSectionContracts(unittest.TestCase):
         def tracked_getitem(dataset, key):
             read_names.append(dataset.name)
             return original_getitem(dataset, key)
-        with mock.patch.object(extractor,"MAX_CONNECTIVITY_VALUES",5), mock.patch.object(h5py.Dataset,"__getitem__",tracked_getitem):
+        with patch.object(extractor,"MAX_CONNECTIVITY_VALUES",5), patch.object(h5py.Dataset,"__getitem__",tracked_getitem):
             with self.assertRaisesRegex(extractor.ExtractionIssue,"bounded per-face"):
                 extractor.read_native_mesh(self.path)
         self.assertNotIn("/meshes/1/faces/nodes/8/nodes",read_names)
