@@ -58,6 +58,20 @@ class NativeQualityContracts(unittest.TestCase):
             target.write_text(target.read_text().replace("3\n(5 0 2)","3\n(5 0 0)"))
             with self.assertRaises(quality.QualityIssue):quality.complete_failed_ids_by_zone(case,log)
 
+    def test_foundation12_native_cell_zone_list_header_preserves_exact_membership_checks(self):
+        # Actual mergeMeshes output uses cellZoneList rather than the older
+        # input regIOobject header. Only this native role is admitted.
+        with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{"RUNNER_TEMP":temp}):
+            case,log=fixture(Path(temp));target=case/"constant/polyMesh/cellZones"
+            target.write_text(target.read_text().replace("class regIOobject;","class cellZoneList;"))
+            result=quality.inspect(case,log)
+            self.assertEqual(result["cellZoneClassification"]["rotating-fluid"]["underdeterminedCellCount"],1)
+            self.assertFalse(result["nativeQualityAccepted"])
+            target.write_text(target.read_text().replace("3(0 3 5)","3(1 3 5)"))
+            with self.assertRaises(quality.QualityIssue):quality.inspect(case,log)
+            target.write_text(target.read_text().replace("class cellZoneList;","class faceZoneList;"))
+            with self.assertRaises(quality.QualityIssue):quality.inspect(case,log)
+
     def test_malformed_duplicate_nonnumeric_outside_or_incomplete_native_set_rejects(self):
         for body in ("3(0 0 5)","3(0 2 6)","3(0 -1 5)","3(0 2 nan)","2(0 5)","3(0 2)","3(0 2 5) junk"):
             with self.subTest(body=body),tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{"RUNNER_TEMP":temp}):

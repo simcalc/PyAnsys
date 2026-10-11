@@ -367,3 +367,20 @@ states `nativeQualityAccepted`; a false value prohibits baseline admission.
 No `foamRun`, NPSH3, physical transient, restart or mesh convergence result is
 produced by the diagnostic job. A later quality repair must explicitly declare
 changes to wall-layer cell membership and recheck every native quality gate.
+
+Actual pilot [38169761754](https://github.com/simcalc/PyAnsys/actions/runs/38169761754)
+derived **1,141,731 cells** and actually executed native merge, NCC and
+`checkMesh`. The unchanged determinant criterion still rejected **11,310
+cells**. All **32** new cell unions were also identified as concave by the
+native check, so this candidate is rejected. No solver was called. The
+source diagnostic located all 11,310 low-determinant cells in the impeller;
+the volute had none. Of those cells, 7,566 directly contact a source boundary
+and the remainder lie within three source-cell adjacency steps of one.
+
+This pilot additionally exposed a diagnostic parser mismatch: Foundation-12
+`mergeMeshes` writes the native `cellZones` header as `cellZoneList`. The
+reader now admits that exact native role while retaining ASCII, object-name,
+complete membership, disjoint-zone, count, hash and immutability checks.
+Re-reading the retained actual bytes completes the diagnostic; it does not
+change the failed native result or accept the 32 unions. Source-cell arithmetic
+and original-to-merged cell equivalence remain distinct evidence checks.

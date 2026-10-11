@@ -111,7 +111,10 @@ def log_metrics(raw):
 
 
 def zones(raw, cell_count):
-    body=native_body(raw,"cellZones",{"regIOobject","cellZoneMesh"})
+    # Foundation-12 native mergeMeshes writes this actual zone container as
+    # cellZoneList. The authored converter uses regIOobject; both still require
+    # the exact object and complete disjoint two-zone cell membership.
+    body=native_body(raw,"cellZones",{"regIOobject","cellZoneMesh","cellZoneList"})
     match=re.fullmatch(r"2\s*\((.*)\)\s*;?",body,re.S)
     require(match,"Exactly two actual merged fluid cell zones are required.")
     entries=list(re.finditer(r'"?([A-Za-z0-9_-]+)"?\s*\{([^{}]*)\}',match[1]))
