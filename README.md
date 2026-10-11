@@ -488,10 +488,21 @@ isotropic padded background grid for both components (largest extent divided
 by 44), source-derived interior seeds verified by three nondegenerate rays,
 feature extraction and uniform level-2 volume refinement. The distance target
 is 1.01 times the common background diagonal; actual selected cell levels must
-independently prove that the native refinement reached level 2. Snapping and
-boundary layers are disabled for this explicitly staircase approximation. Wall resolution and convergence
-remain unqualified. One source coordinate unit equals one metre by declared
+independently prove that the native refinement reached level 2. The current
+trial enables snapping toward the unchanged source-bound surfaces; boundary
+layers remain disabled. This is a distinct approximate mesh, with wall
+resolution, geometry accuracy and convergence still unqualified. One source
+coordinate unit equals one metre by declared
 classroom assumption only. Original volume meshes remain unchanged.
+
+Actual prior castellated-only run
+[38177037633](https://github.com/simcalc/PyAnsys/actions/runs/38177037633)
+generated **357,337 cells** and passed both component and merged native
+`checkMesh` checks. Its source/target interface coverage means were only
+0.9360466/0.9376218, with zero minimum coverage and maxima 1.5/2.0. The
+unchanged NCC acceptance correctly rejected that interface, so no MRF or
+other flow solver ran. The new snapping trial must independently pass the
+same quality and NCC criteria; its success is not assumed.
 
 Each final admitted component has a 450,000-cell cap; the measured
 combined mesh must contain **fewer than 1,000,000 cells**. The serial native

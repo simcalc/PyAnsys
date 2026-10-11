@@ -63,15 +63,15 @@ REPORT_KEYS = {"schemaVersion", "createdAt", "status", "exampleDataCommit", "fou
     "requiredAcceptance", "claimBoundary", "references", *FALSE_FLAGS}
 STATUS = "APPROXIMATE_CLASSROOM_MESH_RECIPE_PREPARED_NATIVE_ACCEPTANCE_REQUIRED"
 CLASSROOM_ASSUMPTIONS = {"metresPerSourceCoordinateUnit": 1, "coordinateUnits": "UNVERIFIED",
-    "surfaceApproximation": "Pinned original-HDF5 polygons were fan-triangulated and stored as float32 STL. OBJ preserves those triangles; castellated-only meshing creates a distinct staircase boundary mesh on one common background grid. Snapping and layers are disabled; no native node/face identity or smooth-wall geometry accuracy is claimed.",
+    "surfaceApproximation": "Pinned original-HDF5 polygons were fan-triangulated and stored as float32 STL. OBJ preserves those triangles; uniform level-2 castellation and snapping create a distinct approximate boundary mesh on one common background grid. Snapping adjusts generated boundary points toward the source-bound surfaces; original HDF5/STL/OBJ targets remain unchanged. Layers are disabled; no native node/face identity or smooth-wall geometry accuracy is claimed.",
     "recipe": {"backgroundLargestExtentDivisions": BASE_DIVISIONS, "commonBackgroundGrid": True,
-               "surfaceRefinementLevel": MAX_LEVEL, "snappingEnabled": False,
+               "surfaceRefinementLevel": MAX_LEVEL, "snappingEnabled": True,
                "uniformVolumeRefinementLevel": MAX_LEVEL,
                "uniformRefinementDistanceFactorTimesBackgroundDiagonal": 1.01,
                "selectedConnectedRegion": "Measured source interior seed; actual native addressing maps retain generated topology and all nonempty physical patches.",
                "minimumGeneratedVolumeFractionRetained": .999,
                "maximumBackgroundCells": 100000,
-               "priorTrial": "38174426218: castellated impeller 76083 cells; 8 isolated zero-determinant cells and 3062 planar/concave cells rejected by unchanged full checkMesh."},
+               "priorTrial": "38177037633: uniform level-2 castellated-only trial generated 357337 combined cells; both components and merged native checkMesh passed, but unchanged NCC coverage rejected reported source min/mean/max 0/0.936/1.5 and target 0/0.938/2. No CFD ran. Earlier 38174426218 rejected 8 isolated zero-determinant and 3062 planar/concave impeller cells."},
     "wallResolutionQualified": False, "layersEnabled": False, "rotationOrFlowPhysicsAuthored": False,
     "insidePoint": "Measured surface-facet candidates with explicit three-ray parity, closest-triangle distance and grid-plane avoidance; no original fluid-cell centre is claimed."}
 LIMITS = {"maximumSeconds": MAX_SECONDS, "maximumCpus": 1, "maximumMemoryBytes": MAX_MEMORY_BYTES,
@@ -371,7 +371,7 @@ def case_files(component, component_surface, background, seed):
     mesh += BACKGROUND_PATCH + " {type patch; faces ((0 4 7 3)(1 2 6 5)(0 1 5 4)(3 7 6 2)(0 3 2 1)(4 5 6 7));}\n);\nmergePatchPairs ();\n"
     regions = "\n".join(name + " {name " + name + ";}" for name in (row["name"] for row in component_surface["patches"]))
     refinements = "\n".join(row["name"] + " {level (2 2); patchInfo {type " + ("wall" if row["sourceZoneType"] == 3 else "patch") + ";}}" for row in component_surface["patches"])
-    snappy = header("snappyHexMeshDict") + "castellatedMesh true; snap false; addLayers false;\ngeometry\n{\n"
+    snappy = header("snappyHexMeshDict") + "castellatedMesh true; snap true; addLayers false;\ngeometry\n{\n"
     snappy += component + " {type triSurfaceMesh; file \"" + component + "-union.obj\"; regions {\n" + regions + "\n}}\n}\n"
     snappy += "castellatedMeshControls\n{\nmaxLocalCells 450000; maxGlobalCells 450000; minRefinementCells 0; maxLoadUnbalance 0.1; nCellsBetweenLevels 3; resolveFeatureAngle 30; allowFreeStandingZoneFaces true; extendedRefinementSpan true;\n"
     distance = 1.01 * float(np.linalg.norm(np.asarray(maximum) - np.asarray(minimum)))

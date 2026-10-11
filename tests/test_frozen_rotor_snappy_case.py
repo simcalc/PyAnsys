@@ -195,7 +195,7 @@ class SnappyPreparationTests(unittest.TestCase):
                 for component in report["components"]:
                     folder=output/component["caseDirectory"]
                     snappy=(folder/"system/snappyHexMeshDict").read_text()
-                    self.assertIn("castellatedMesh true; snap false; addLayers false;",snappy)
+                    self.assertIn("castellatedMesh true; snap true; addLayers false;",snappy)
                     self.assertIn("level (2 2)",snappy)
                     self.assertIn("mode distance; levels ((",snappy)
                     self.assertIn("insidePoint ",snappy)
@@ -209,6 +209,55 @@ class SnappyPreparationTests(unittest.TestCase):
                 (output/"impeller-case/constant/polyMesh").mkdir()
                 (output/"impeller-case/constant/polyMesh/points").write_text("synthetic native extra; not accepted as proof")
                 self.assertEqual(case.verify_output(output)["report"],report)
+
+    def test_snapped_trial_changes_exact_recipe_sha_with_unchanged_surface_pins_and_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);surfaces,proof,stack=fixture(root)
+            with stack:
+                originals={p.relative_to(surfaces).as_posix():sha256(p.read_bytes()).hexdigest() for p in surfaces.rglob("*") if p.is_file()}
+                output=root/"new-snapped-trial";report=case.prepare(surfaces,proof,output)
+                assumptions=report["classroomAssumptions"]
+                self.assertIs(assumptions["recipe"]["snappingEnabled"],True)
+                self.assertEqual(assumptions["recipe"]["backgroundLargestExtentDivisions"],44)
+                self.assertEqual(assumptions["recipe"]["uniformVolumeRefinementLevel"],2)
+                self.assertEqual(assumptions["recipe"]["surfaceRefinementLevel"],2)
+                self.assertEqual(assumptions["recipe"]["minimumGeneratedVolumeFractionRetained"],.999)
+                self.assertIn("38177037633",assumptions["recipe"]["priorTrial"])
+                self.assertIn("unchanged NCC coverage rejected",assumptions["recipe"]["priorTrial"])
+                self.assertIn("original HDF5/STL/OBJ targets remain unchanged",assumptions["surfaceApproximation"])
+                self.assertNotIn("Snapping and layers are disabled",assumptions["surfaceApproximation"])
+                self.assertIs(assumptions["layersEnabled"],False)
+                self.assertIs(assumptions["wallResolutionQualified"],False)
+                self.assertEqual(report["limits"]["maximumSeconds"],900)
+                self.assertEqual(report["limits"]["maximumActualComponentCells"],450000)
+                self.assertEqual(report["limits"]["maximumMemoryBytes"],4*1024**3)
+                rows={row["path"]:row for row in report["authoredFileRecords"]}
+                for component in report["components"]:
+                    path=component["caseDirectory"]+"/system/snappyHexMeshDict"
+                    actual=(output/path).read_bytes();previous=actual.replace(b"snap true;",b"snap false;",1)
+                    self.assertEqual(actual.count(b"castellatedMesh true; snap true; addLayers false;"),1)
+                    self.assertNotEqual(sha256(actual).hexdigest(),sha256(previous).hexdigest())
+                    self.assertEqual(rows[path]["sha256"],sha256(actual).hexdigest())
+                    self.assertIn(b"minDeterminant 0.001;",actual)
+                    self.assertIn(b"maxNonOrtho 65;",actual)
+                    self.assertIn(b"maxInternalSkewness 4;",actual)
+                self.assertTrue(all(report[flag] is False for flag in case.FALSE_FLAGS))
+                self.assertEqual(originals,{p.relative_to(surfaces).as_posix():sha256(p.read_bytes()).hexdigest() for p in surfaces.rglob("*") if p.is_file()})
+
+    def test_old_snap_setting_or_metadata_cannot_replay_as_current_trial(self):
+        for change in ("dictionary","metadata"):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);surfaces,proof,stack=fixture(root)
+                with stack:
+                    output=root/"snappy";case.prepare(surfaces,proof,output)
+                    if change=="dictionary":
+                        path=output/"impeller-case/system/snappyHexMeshDict"
+                        path.write_bytes(path.read_bytes().replace(b"snap true;",b"snap false;",1))
+                    else:
+                        report=case.json_file(output,case.REPORT)
+                        report["classroomAssumptions"]["recipe"]["snappingEnabled"]=False
+                        (output/case.REPORT).write_bytes(case.encoded(report))
+                    with self.assertRaises(case.SnappyIssue):case.verify_output(output)
 
     def test_authored_geometry_recipe_or_report_mutation_prevents_verification(self):
         for mutation in ("dictionary","seed","command","CFD"):
