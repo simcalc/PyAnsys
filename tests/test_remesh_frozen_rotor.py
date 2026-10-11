@@ -24,6 +24,30 @@ FACES = [(1, 3, 2), (1, 2, 4), (2, 3, 4), (3, 1, 4)]
 
 
 class RemeshContracts(unittest.TestCase):
+    def test_live_progress_does_not_promote_candidate_or_expose_extra_report_fields(self):
+        with TemporaryDirectory() as directory:
+            target = Path(directory)
+            (target / 'remesh-progress.json').write_text(json.dumps({
+                'schemaVersion': remesh.SCHEMA, 'stage': 'measured-volume-quality-diagnostics',
+                'component': 'impeller', 'privateExtra': 'excluded',
+                'generatedVolumeDiagnostics': {'exportedVolumeElementCount': 42,
+                    'nativeQualityMetrics': {'minSICN': {'minimum': -1e-15, 'negativeCount': 1}}}}))
+            row = remesh.live_progress_summary(target, ['a', 'b', 'c', 'd'])
+            self.assertEqual(row['actualExportedVolumeCells'], 42)
+            self.assertEqual(row['nativeMinSicn']['minimum'], -1e-15)
+            self.assertEqual(row['nativeTail'], ['b', 'c', 'd'])
+            self.assertFalse(row['volumeMeshAccepted'])
+            self.assertNotIn('privateExtra', row)
+
+    def test_live_progress_rejects_wrong_schema_or_unbounded_file(self):
+        with TemporaryDirectory() as directory:
+            target = Path(directory)
+            path = target / 'remesh-progress.json'
+            for raw in ('{}', 'x' * (remesh.inventory.MAX_REPORT_BYTES + 1)):
+                path.write_text(raw)
+                with self.assertRaises(remesh.RemeshIssue):
+                    remesh.live_progress_summary(target, [])
+
     def model(self):
         return {"coordinates": POINTS, "zones": [{"zoneId": 11, "name": "wall", "faces": [(1,FACES[0]),(2,FACES[1])]},
             {"zoneId": 12, "name": "interface-original", "faces": [(3,FACES[2]),(4,FACES[3])]}]}
@@ -493,7 +517,7 @@ class RemeshContracts(unittest.TestCase):
             target=Path(root)/"trial"
             def launched(*arguments,**options):
                 target.mkdir()
-                remesh.persist_json(target,"remesh-progress.json",{"stage":"fixed-boundary-tetrahedral-fill","component":"impeller",
+                remesh.persist_json(target,"remesh-progress.json",{"schemaVersion":remesh.SCHEMA,"stage":"fixed-boundary-tetrahedral-fill","component":"impeller",
                     "verifiedSources":verified,"journal":[],"surfaceZoneBindings":[]})
                 (target/"impeller.msh").write_bytes(b"Incomplete native output")
                 return process

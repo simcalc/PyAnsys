@@ -809,12 +809,32 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
     return report
 
 
+def live_progress_summary(destination, tail):
+    """Small measured facts for the classroom Actions log, never an acceptance."""
+    row = {}
+    path = destination / "remesh-progress.json"
+    if path.exists():
+        if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= inventory.MAX_REPORT_BYTES:
+            raise RemeshIssue("Live progress must use the bounded regular attempt-owned report.")
+        row = json.loads(path.read_bytes())
+        if row.get("schemaVersion") != SCHEMA:
+            raise RemeshIssue("Live progress requires the exact native progress schema.")
+    measured = row.get("generatedVolumeDiagnostics") or {}
+    return {"status": "NativeMeshInProgress", "stage": row.get("stage", "worker-startup"),
+            "component": row.get("component"),
+            "actualExportedVolumeCells": measured.get("exportedVolumeElementCount"),
+            "nativeMinSicn": measured.get("nativeQualityMetrics", {}).get("minSICN"),
+            "nativeTail": list(tail)[-3:], "volumeMeshAccepted": False,
+            "actualCfdRunVerified": False, "mainApplicationWrites": False}
+
+
 def supervised_run(value, optimisation_mode="full"):
     optimisation = optimisation_metadata(optimisation_mode)
     destination = checked_output(value)
     if sys.platform != "linux":
         raise RemeshIssue("Run the supervised native geometry trial only on the isolated GitHub Ubuntu worker.")
     started, tail, pending, received, timed_out = time.monotonic(), deque(maxlen=NATIVE_TAIL_LINES), b"", 0, False
+    last_live_progress = started - 30
     command = [sys.executable,"-B",str(Path(__file__).resolve()),"--native-worker","--output-dir",str(destination),
                "--optimisation-mode",optimisation_mode]
     process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=child_environment(),
@@ -823,6 +843,9 @@ def supervised_run(value, optimisation_mode="full"):
     selector.register(process.stdout,selectors.EVENT_READ)
     try:
         while selector.get_map():
+            if time.monotonic() - last_live_progress >= 30:
+                print(json.dumps(live_progress_summary(destination, tail), allow_nan=False), flush=True)
+                last_live_progress = time.monotonic()
             if not timed_out and process.poll() is None and time.monotonic()-started >= MAX_SECONDS:
                 timed_out = True
                 stop_owned_worker(process)
