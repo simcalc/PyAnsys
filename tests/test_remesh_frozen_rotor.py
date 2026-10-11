@@ -51,6 +51,21 @@ class RemeshContracts(unittest.TestCase):
             with self.assertRaisesRegex(remesh.RemeshIssue,"closed native"):
                 remesh.source_triangles(model)
 
+    def test_explicit_source_seam_partition_splits_mixed_entities_with_full_native_coverage(self):
+        _,owners,_=remesh.source_triangles(self.model())
+        originals={tuple(sorted(row)):row for row in FACES}
+        # Geometry classification spans a smooth native BC seam and may reorder.
+        groups={25:[tuple(reversed(FACES[0])),FACES[2]],26:[FACES[1],FACES[3]]}
+        partitions=remesh.partition_source_seams(groups,owners,originals)
+        self.assertEqual([(row["originalClassifiedEntityId"],row["sourceZoneId"]) for row in partitions],[(25,11),(25,12),(26,11),(26,12)])
+        self.assertEqual(partitions[0]["triangles"],[FACES[0]])
+        checked=remesh.classified_owners({row["entityId"]:row["triangles"] for row in partitions},owners)
+        self.assertEqual(checked,{11:[1,3],12:[2,4]})
+        self.assertEqual({tuple(sorted(triangle)) for row in partitions for triangle in row["triangles"]},set(owners))
+        for invalid in ({25:FACES[:-1]}, {25:FACES,26:[FACES[0]]}, {25:FACES[:-1]+[(3,1,99)]}):
+            with self.subTest(invalid=invalid),self.assertRaises(remesh.RemeshIssue):
+                remesh.partition_source_seams(invalid,owners,originals)
+
     def test_size_uses_explicit_trial_bbox_divisor_without_cell_prediction(self):
         box=remesh.bounds(list(POINTS.values()))
         self.assertEqual(remesh.sizing(box),1/32)

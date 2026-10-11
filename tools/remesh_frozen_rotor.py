@@ -103,6 +103,29 @@ def classified_owners(surface_triangles, owners):
     return dict(groups)
 
 
+def partition_source_seams(surface_triangles, owners, originals):
+    """Intersect geometric patches with exact native zone ownership, not distance."""
+    if set(originals) != set(owners) or not 1 <= len(surface_triangles) <= MAX_CLASSIFIED_SURFACES:
+        raise RemeshIssue("Source seam partitioning requires the complete bounded native triangle map.")
+    partitions, seen = [], set()
+    for entity, triangles in sorted(surface_triangles.items()):
+        by_zone = defaultdict(list)
+        if not triangles:
+            raise RemeshIssue("Every geometric classified entity must contain source triangles.")
+        for triangle in triangles:
+            key = tuple(sorted(int(node) for node in triangle))
+            if len(set(key)) != 3 or key not in owners or key in seen:
+                raise RemeshIssue("Partitioning must retain every unique exact native triangle and global node ID.")
+            seen.add(key)
+            by_zone[owners[key]].append(originals[key])  # Retain original native winding.
+        for zone, native_triangles in sorted(by_zone.items()):
+            partitions.append({"entityId": len(partitions)+1, "originalClassifiedEntityId": int(entity),
+                               "sourceZoneId": zone, "triangles": native_triangles})
+    if seen != set(owners) or len(partitions) > MAX_CLASSIFIED_SURFACES:
+        raise RemeshIssue("Native zone-seam partitions must cover all source triangles within the entity budget.")
+    return partitions
+
+
 def bounds(points):
     if not points:
         raise RemeshIssue("A nonempty finite coordinate set is required.")
@@ -229,11 +252,32 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     progress["stage"] = "classification-and-zone-binding"
     gmsh.model.mesh.classifySurfaces(math.radians(40), True, True, math.pi)
     surface_rows = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
-    groups = classified_owners(surface_rows, owners)
     classified_tags, classified_xyz, _ = gmsh.model.mesh.getNodes()
     classified_points = {int(tag): tuple(float(value) for value in classified_xyz[i*3:i*3+3]) for i, tag in enumerate(classified_tags)}
     if len(classified_tags) != len(classified_points) or classified_points != native_points:
         raise RemeshIssue("Classification must preserve every exact float64 native coordinate and global node ID.")
+    originals = {tuple(sorted(triangle)): triangle for zone in zones for triangle in zone["triangles"]}
+    original_ids = {tuple(sorted(triangle)): identifier for zone in zones for triangle, identifier in zip(zone["triangles"], zone["elementIds"])}
+    partitions = partition_source_seams(surface_rows, owners, originals)
+    # Sharp-feature classification can merge a smooth BC seam. Rebuild exact
+    # intersections with native zones, so topology creates a real shared curve.
+    progress["stage"] = "source-zone-seam-topology"
+    gmsh.model.remove()
+    gmsh.model.add(component)
+    for row in partitions:
+        gmsh.model.addDiscreteEntity(2, row["entityId"])
+    gmsh.model.mesh.addNodes(2, partitions[0]["entityId"], used, [value for node in used for value in native_points[node]])
+    for row in partitions:
+        tags = [original_ids[tuple(sorted(triangle))] for triangle in row["triangles"]]
+        gmsh.model.mesh.addElementsByType(row["entityId"], 2, tags, [node for triangle in row["triangles"] for node in triangle])
+    gmsh.model.mesh.reclassifyNodes()
+    gmsh.model.mesh.createTopology(makeSimplyConnected=True, exportDiscrete=True)
+    surface_rows = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
+    groups = classified_owners(surface_rows, owners)
+    topology_tags, topology_xyz, _ = gmsh.model.mesh.getNodes()
+    topology_points = {int(tag): tuple(float(value) for value in topology_xyz[i*3:i*3+3]) for i, tag in enumerate(topology_tags)}
+    if len(topology_tags) != len(topology_points) or topology_points != native_points:
+        raise RemeshIssue("Seam topology must preserve every exact float64 native coordinate and global node ID.")
     progress["stage"] = "discrete-parametrization"
     gmsh.model.mesh.createGeometry()
     loop = gmsh.model.geo.addSurfaceLoop(sorted(surface_rows))
@@ -293,6 +337,9 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest, "format": "gmsh-msh2.2-ascii"},
               "sourceCellCount": model["nativeCounts"]["cellCount"], "sourceNodeCount": model["nativeCounts"]["nodeCount"],
               "generatedCellCount": len(cells), "generatedNodeCount": len(points), "sourceBoundaryAudit": native_audit,
+              "sourceSeamPartition": {"method": "Exact native triangle-triplet ownership intersection with classified geometric surfaces; rebuilt discrete entities and createTopology(True,True)",
+                  "partitionCount": len(partitions), "finalSurfaceEntityCount": len(surface_rows), "completeNativeTriangleCoverageVerified": True,
+                  "mixedSourceZoneEntityCount": 0, "nativeGlobalNodeCoordinatesVerified": True, "nearestTagGuessPerformed": False},
               "sourceBoundaryBoundsAssumedM": native_box, "generatedBoundsAssumedM": bounds(list(points.values())),
               "cellMetrics": metrics, "gmshQuality": quality, "boundaryZones": boundary_rows,
               "volumePhysicalGroup": "rotating-fluid" if component == "impeller" else "stationary-fluid",
