@@ -242,5 +242,95 @@ class PreparationContracts(unittest.TestCase):
                 with self.subTest(body=body),self.assertRaises(case.CaseIssue):case.verify_conversion(root,expected,log)
 
 
+    def merged_fixture(self, root):
+        """Synthetic metadata only; its log is not actual native checkMesh evidence."""
+        mesh=root/"constant/polyMesh";mesh.mkdir(parents=True)
+        components={component:{"cellZone":"rotating-fluid" if component=="impeller" else "stationary-fluid",
+                               "nodeCount":4,"cellCount":1,"patchFaces":{name:1 for name in names}}
+                    for component,names in case.PATCHES.items()}
+        patches=[];owners=[];faces=[];start=0
+        for cell,component in enumerate(("impeller","volute")):
+            for name in sorted(case.PATCHES[component]):
+                kind="wall" if name in case.ROTATING|case.STATIONARY else "patch"
+                patches.append(f"{name} {{type {kind}; nFaces 1; startFace {start};}}")
+                owners.append(cell);faces.append("3("+" ".join(str(value+4*cell) for value in (0,1,2))+")")
+                start+=1
+        patches.append(f"defaultFaces {{type patch; nFaces 0; startFace {start};}}")
+        originals=("interface-impeller-outlet","interface-volute-inlet")
+        for original,opposite in zip(originals,reversed(originals)):
+            patches.append("pumpInterface_on_"+original+f" {{type nonConformalCyclic; nFaces 0; startFace {start}; originalPatch {original}; neighbourPatch pumpInterface_on_{opposite}; transformType none;}}")
+        for original in originals:
+            patches.append("nonConformalError_on_"+original+f" {{type nonConformalError; nFaces 0; startFace {start}; originalPatch {original};}}")
+        contents={"points":"8\n((0 0 0)(1 0 0)(0 1 0)(0 0 1)(2 0 0)(3 0 0)(2 1 0)(2 0 1))",
+                  "owner":str(len(owners))+"\n("+" ".join(map(str,owners))+")","neighbour":"0\n()",
+                  "faces":str(len(faces))+"\n("+"".join(faces)+")",
+                  "boundary":str(len(patches))+"\n("+"\n".join(patches)+")",
+                  "cellZones":"2\n(rotating-fluid {type cellZone; cellLabels List<label> 1(0);} stationary-fluid {type cellZone; cellLabels List<label> 1(1);})"}
+        for name,body in contents.items():
+            kind={"points":"vectorField","faces":"faceList","owner":"labelList","neighbour":"labelList","boundary":"polyBoundaryMesh","cellZones":"regIOobject"}[name]
+            (mesh/name).write_text(case.foam_header(name,kind)+body)
+        log=root/"log.checkMesh"
+        log.write_text("# SYNTHETIC-CONTRACT-NOT-NATIVE-CFD\n    cells: 2\nSource min/average/max coverage = 0.999/1/1\nTarget min/average/max coverage = 1/1/1\nMesh OK.\nEnd\n")
+        return mesh,components,log
+
+    def test_merged_gate_binds_actual_zone_ownership_source_patches_and_ncc_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            result=case.verify_merged_mesh(root,expected,log)
+            self.assertEqual(result["mergedCellCount"],2)
+            self.assertEqual(result["cellZones"],{"rotating-fluid":1,"stationary-fluid":1})
+            self.assertEqual(len(result["sourcePatchFaces"]),11)
+            self.assertEqual(len(result["nonConformalCyclicPatches"]),2)
+            self.assertEqual(len(result["nonConformalErrorPatches"]),2)
+            self.assertTrue(result["coupledInterfaceCoverageVerified"])
+            self.assertFalse(result["actualCfdRunVerified"])
+            self.assertFalse(result["qualifiedBaseline"])
+            self.assertFalse(result["mainApplicationWrites"])
+            self.assertEqual(result["checkMeshLogSha256"],case.sha256(log.read_bytes()).hexdigest())
+
+    def test_merged_gate_requires_real_completed_log_matching_cells_and_coverage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            original=log.read_text()
+            for wrong in (original.replace("cells: 2","cells: 3"),original.replace("Mesh OK.","Failed 1 mesh checks."),
+                          original.replace("End\n",""),original.replace("Source min/average/max coverage = 0.999/1/1\nTarget min/average/max coverage = 1/1/1\n",""),
+                          original.replace("0.999/1/1","0.98/0.998/1"),original.replace("0.999/1/1","0.999/1/1.02"),
+                          original.replace("0.999/1/1","1/0.999/1"),original+"FOAM FATAL ERROR\n"):
+                log.write_text(wrong)
+                with self.subTest(log=wrong),self.assertRaises(case.CaseIssue):case.verify_merged_mesh(root,expected,log)
+
+    def test_merged_gate_rejects_changed_zone_identity_coverage_or_patch_ownership(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            original=(mesh/"cellZones").read_text()
+            for wrong in (original.replace("stationary-fluid","other-fluid"),original.replace("1(1)","1(0)"),
+                          original.replace("1(0)","1(9)"),original.replace("1(0)","1(1)").replace("stationary-fluid {type cellZone; cellLabels List<label> 1(1)","stationary-fluid {type cellZone; cellLabels List<label> 1(0)")):
+                (mesh/"cellZones").write_text(wrong)
+                with self.subTest(zone=wrong),self.assertRaises(case.CaseIssue):case.verify_merged_mesh(root,expected,log)
+
+    def test_merged_gate_rejects_missing_or_wrong_ncc_and_physical_wall_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            original=(mesh/"boundary").read_text()
+            for wrong in (original.replace("blade {type wall","blade {type patch"),
+                          original.replace("neighbourPatch pumpInterface_on_interface-volute-inlet","neighbourPatch wrongPair"),
+                          original.replace("originalPatch interface-impeller-outlet","originalPatch inlet"),
+                          original.replace("transformType none","transformType rotational"),
+                          original.replace("type nonConformalError","type patch"),
+                          original.replace("pumpInterface_on_interface-impeller-outlet {type nonConformalCyclic","otherCouple {type nonConformalCyclic"),
+                          original.replace("defaultFaces {type patch; nFaces 0","defaultFaces {type patch; nFaces 1")):
+                (mesh/"boundary").write_text(wrong)
+                with self.subTest(boundary=wrong),self.assertRaises(case.CaseIssue):case.verify_merged_mesh(root,expected,log)
+
+    def test_merged_gate_rejects_changed_points_faces_and_owner_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,expected,log=self.merged_fixture(root)
+            for name,before,after in (("points","8\n(","7\n("),("points","(1 0 0)","(nan 0 0)"),
+                                      ("faces","3(0 1 2)","3(0 1 9)"),("owner","0 0 0 0 0 0 0","0 0 0 0 0 0 9")):
+                original=(mesh/name).read_text();(mesh/name).write_text(original.replace(before,after))
+                with self.subTest(native=name),self.assertRaises(case.CaseIssue):case.verify_merged_mesh(root,expected,log)
+                (mesh/name).write_text(original)
+
+
 if __name__ == "__main__":
     unittest.main()

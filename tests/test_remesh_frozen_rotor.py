@@ -273,7 +273,7 @@ class RemeshContracts(unittest.TestCase):
             with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched),\
                  patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),\
                  patch.object(remesh.os,"read",side_effect=[b"Info : HXT boundary recovery\n",b""]),\
-                 patch.object(remesh.time,"monotonic",side_effect=[0]+[301]*20),\
+                 patch.object(remesh.time,"monotonic",side_effect=[0]+[remesh.MAX_SECONDS+1]*20),\
                  patch.object(remesh,"stop_owned_worker",side_effect=stopped) as stop,\
                  patch.object(remesh.inventory,"verify_file",side_effect=verify) as checked:
                 summary=remesh.supervised_run(target)
@@ -316,7 +316,7 @@ class RemeshContracts(unittest.TestCase):
                 return Process()
             with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched),\
                  patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",return_value=b""),\
-                 patch.object(remesh.time,"monotonic",side_effect=[0]+[301]*20),patch.object(remesh,"stop_owned_worker") as stop:
+                 patch.object(remesh.time,"monotonic",side_effect=[0]+[remesh.MAX_SECONDS+1]*20),patch.object(remesh,"stop_owned_worker") as stop:
                 summary=remesh.supervised_run(target)
             report=json.loads((target/"remesh-report.json").read_text())
             self.assertFalse(summary["volumeMeshGenerated"])

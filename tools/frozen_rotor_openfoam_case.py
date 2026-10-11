@@ -424,6 +424,153 @@ def verify_conversion(case_directory, expected, converter_log, *, after_wall_typ
             "logSha256": sha256(log.encode("utf-8")).hexdigest(), "claim": "Actual converter completion plus native points/topology/tag/count/cell coverage; coupled coverage and checkMesh remain separate."}
 
 
+def verify_merged_mesh(case_directory, expected_components, check_mesh_log):
+    """Verify the actual merged native mesh and fixed NCC pair before a solve.
+
+    Native non-conformal cyclic/error patches have zero poly faces; their
+    intersection coverage must be read from the actual checkMesh log. An
+    original interface remains a plain patch and retains its source faces.
+    """
+    case = regular_directory(case_directory)
+    components = list(expected_components.values()) if isinstance(expected_components, dict) else expected_components
+    if not isinstance(components, list) or len(components) != 2 or not all(isinstance(row, dict) for row in components):
+        raise CaseIssue("Bind both actual converted component inventories before the merged mesh gate.")
+    zones_expected, patches_expected, patch_zone, point_count, cell_count = {}, {}, {}, 0, 0
+    for row in components:
+        zone, count, nodes, patches = row.get("cellZone"), row.get("cellCount"), row.get("nodeCount"), row.get("patchFaces")
+        if zone not in {"rotating-fluid", "stationary-fluid"} or zone in zones_expected or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (count, nodes)) or not isinstance(patches, dict):
+            raise CaseIssue("Require the two exact fluid zone identities and positive actual component counts.")
+        if set(patches_expected) & set(patches) or any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in patches.values()):
+            raise CaseIssue("Actual source patch inventories must be distinct with positive face counts.")
+        zones_expected[zone] = count
+        patches_expected.update(patches)
+        patch_zone.update({name: zone for name in patches})
+        point_count += nodes
+        cell_count += count
+    if set(zones_expected) != {"rotating-fluid", "stationary-fluid"} or set(patches_expected) != set().union(*PATCHES.values()):
+        raise CaseIssue("Merged verification requires both full exact source component patch inventories.")
+    log_raw = read_regular(check_mesh_log, 4*1024**2)
+    log = log_raw.decode("utf-8")
+    if not re.search(r"(?m)^End\s*$", log) or "Mesh OK." not in log or re.search(r"FOAM FATAL|Segmentation fault|Floating point exception|Failed [1-9]\d* mesh checks", log):
+        raise CaseIssue("Completed actual checkMesh geometry/topology acceptance is required before foamRun.")
+    native_cells = re.findall(r"(?m)^\s*cells:\s*(\d+)\s*$", log)
+    if len(native_cells) != 1 or int(native_cells[0]) != cell_count:
+        raise CaseIssue("The actual checkMesh merged cell count must equal both component counts.")
+    mesh = case / "constant/polyMesh"
+    np, point_body = native_list(mesh / "points")
+    seen_points, end = 0, 0
+    for match in re.finditer(r"\(([^()]*)\)", point_body):
+        if point_body[end:match.start()].strip():
+            raise CaseIssue("Every native merged point must have a complete plain vector row.")
+        xyz = [float(value) for value in match[1].split()]
+        if len(xyz) != 3 or not all(math.isfinite(value) for value in xyz):
+            raise CaseIssue("Merged point coordinates must remain finite three-vectors.")
+        seen_points += 1
+        end = match.end()
+    if point_body[end:].strip() or np != point_count or seen_points != np:
+        raise CaseIssue("Actual merged points must preserve the combined converted point count.")
+    no, owner_body = native_list(mesh / "owner")
+    nn, neighbour_body = native_list(mesh / "neighbour")
+    owner, neighbour = [int(value) for value in owner_body.split()], [int(value) for value in neighbour_body.split()]
+    if len(owner) != no or len(neighbour) != nn or nn > no or any(value < 0 or value >= cell_count for values in (owner, neighbour) for value in values):
+        raise CaseIssue("Merged native owner/neighbour lists must be complete and within the actual cell domain.")
+    if set(owner) | set(neighbour) != set(range(cell_count)) or any(owner[i] >= neighbour[i] for i in range(nn)):
+        raise CaseIssue("The merged topology must retain every cell and ordered distinct internal owner/neighbour pairs.")
+    nf, face_body = native_list(mesh / "faces")
+    face_count, end = 0, 0
+    for match in re.finditer(r"(\d+)\s*\(([^()]*)\)", face_body):
+        if face_body[end:match.start()].strip():
+            raise CaseIssue("Every merged native face must have a complete counted plain row.")
+        ids = [int(value) for value in match[2].split()]
+        if len(ids) != int(match[1]) or len(ids) < 3 or len(set(ids)) != len(ids) or any(value < 0 or value >= np for value in ids):
+            raise CaseIssue("Merged native faces must retain valid distinct point references.")
+        face_count += 1
+        end = match.end()
+    if face_body[end:].strip() or nf != no or face_count != nf:
+        raise CaseIssue("Actual merged face and owner counts must agree.")
+    nb, boundary_body = native_list(mesh / "boundary")
+    entries = re.findall(r'"?([A-Za-z0-9_-]+)"?\s*\{([^{}]*)\}', boundary_body)
+    if len(entries) != nb:
+        raise CaseIssue("Merged native boundary must have a complete simple patch dictionary list.")
+    rotor, stator = "interface-impeller-outlet", "interface-volute-inlet"
+    coupled = {"pumpInterface_on_" + rotor: (rotor, "pumpInterface_on_" + stator),
+               "pumpInterface_on_" + stator: (stator, "pumpInterface_on_" + rotor)}
+    errors = {"nonConformalError_on_" + original: original for original in (rotor, stator)}
+    actual, ranges, start, placeholders = {}, {}, nn, []
+    for name, body in entries:
+        size = re.search(r"\bnFaces\s+(\d+)\s*;", body)
+        first = re.search(r"\bstartFace\s+(\d+)\s*;", body)
+        kind = re.search(r"\btype\s+(\w+)\s*;", body)
+        if name in actual or not size or not first or not kind or int(first[1]) != start:
+            raise CaseIssue("Merged native patches must have contiguous unique face ranges and explicit classes.")
+        count = int(size[1])
+        actual[name] = count
+        ranges[name] = (start, count)
+        if name in patches_expected:
+            expected_type = "wall" if name in ROTATING | STATIONARY else "patch"
+            if kind[1] != expected_type or count != patches_expected[name]:
+                raise CaseIssue("The merged source patch face counts and physical wall types must remain exact.")
+        elif name in coupled:
+            original, opposite = coupled[name]
+            if kind[1] != "nonConformalCyclic" or count != 0 or not re.search(r"\boriginalPatch\s+" + re.escape(original) + r"\s*;", body) or not re.search(r"\bneighbourPatch\s+" + re.escape(opposite) + r"\s*;", body) or not re.search(r"\btransformType\s+none\s*;", body):
+                raise CaseIssue("The exact reciprocal non-conformal cyclic pair must bind its original source interfaces with no transform.")
+        elif name in errors:
+            if kind[1] != "nonConformalError" or count != 0 or not re.search(r"\boriginalPatch\s+" + re.escape(errors[name]) + r"\s*;", body):
+                raise CaseIssue("The two exact native non-conformal error placeholders must bind the original interfaces.")
+        elif name == "defaultFaces" and kind[1] == "patch" and count == 0:
+            placeholders.append({"name": name, "type": "patch", "nFaces": 0, "startFace": start})
+        else:
+            raise CaseIssue("Unexpected or positive unassigned merged boundary patches are prohibited.")
+        start += count
+    required = set(patches_expected) | set(coupled) | set(errors)
+    if required - set(actual) or start != no:
+        raise CaseIssue("Merged native boundary must retain every exact source patch and both complete NCC pair/error placeholders.")
+    nz, zone_body = native_list(mesh / "cellZones")
+    zones = re.findall(r'"?([A-Za-z0-9_-]+)"?\s*\{([^{}]*)\}', zone_body)
+    if nz != 2 or len(zones) != 2 or {name for name, _ in zones} != set(zones_expected):
+        raise CaseIssue("Merged native cell zones must retain both exact fluid identities.")
+    all_labels, verified_zones, zone_labels = set(), {}, {}
+    for name, body in zones:
+        labels = re.search(r"\bcellLabels\s+(?:List<label>\s+)?(\d+)\s*\(([^()]*)\)\s*;", body, re.S)
+        values = [int(value) for value in labels[2].split()] if labels else []
+        local = set(values)
+        if not re.search(r"\btype\s+cellZone\s*;", body) or not labels or int(labels[1]) != zones_expected[name] or len(values) != zones_expected[name] or len(local) != len(values) or any(value < 0 or value >= cell_count for value in values) or all_labels & local:
+            raise CaseIssue("Both merged cell-zone inventories must be complete, disjoint and retain their exact source cell counts.")
+        all_labels |= local
+        verified_zones[name] = len(values)
+        zone_labels[name] = local
+    if all_labels != set(range(cell_count)):
+        raise CaseIssue("Both exact native cell zones must cover every merged cell exactly once.")
+    for name, zone in patch_zone.items():
+        first, count = ranges[name]
+        if any(owner[index] not in zone_labels[zone] for index in range(first, first + count)):
+            raise CaseIssue("Every original merged source patch must retain ownership in its exact component cell zone.")
+    rotating_labels = zone_labels["rotating-fluid"]
+    if any((owner[index] in rotating_labels) != (neighbour[index] in rotating_labels) for index in range(nn)):
+        raise CaseIssue("Separate merged component volumes cannot gain unproved internal faces across the fixed NCC interface.")
+    numeric = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    matches = re.findall(r"Source min/average/max coverage = (" + numeric + r")/(" + numeric + r")/(" + numeric + r")\s+Target min/average/max coverage = (" + numeric + r")/(" + numeric + r")/(" + numeric + r")", log)
+    if not matches:
+        raise CaseIssue("Actual NCC intersection coverage is missing: rerun checkMesh after native coupling and retain its source/target coverage statistics before foamRun.")
+    coverage = []
+    for match in matches:
+        values = [float(value) for value in match]
+        for triple in (values[:3], values[3:]):
+            if not all(math.isfinite(value) for value in triple) or not .99 <= triple[0] <= triple[1] <= triple[2] <= 1.01 or triple[1] < .999:
+                raise CaseIssue("Actual NCC source/target coverage does not satisfy the declared minimum0.99/average0.999/maximum1.01 criteria; repair the coupled interfaces before foamRun.")
+        coverage.append({"source": values[:3], "target": values[3:]})
+    return {"mergedCellCount": cell_count, "mergedPointCount": np, "mergedFaceCount": nf,
+            "cellZones": verified_zones, "sourcePatchFaces": patches_expected,
+            "nonConformalCyclicPatches": list(coupled), "nonConformalErrorPatches": list(errors),
+            "emptyDefaultFacesPlaceholders": placeholders, "nativeCoupledCoverage": coverage,
+            "coverageCriteria": {"minimum": .99, "average": .999, "maximum": 1.01},
+            "mergedNativeIdentityVerified": True, "physicalWallTypesVerified": True,
+            "nativeGeometryQualityVerified": True, "coupledInterfaceCoverageVerified": True,
+            "actualCfdRunVerified": False, "qualifiedBaseline": False, "mainApplicationWrites": False,
+            "checkMeshLogSha256": sha256(log_raw).hexdigest(),
+            "claimBoundary": "Actual merged topology/source identities, wall classes, checkMesh and fixed-interface coverage before any solver; no flow solution or converged performance claim."}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mesh-directory", type=Path, required=True)

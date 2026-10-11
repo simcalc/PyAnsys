@@ -27,7 +27,7 @@ import inspect_frozen_rotor_mesh as inventory
 
 SCHEMA = "untirta.frozen-rotor-classroom-remesh.v1"
 GMSH_VERSION = "4.15.2"
-MAX_SECONDS = 300
+MAX_SECONDS = 900
 MAX_MEMORY_BYTES = 2 * 1024**3
 MAX_OUTPUT_BYTES = 128 * 1024**2  # Raw ASCII meshes; public ZIP budget is separate.
 MAX_NEW_CELLS_PER_COMPONENT = 800_000
@@ -423,7 +423,7 @@ def enforce_runtime_limits():
     for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[key] = "1"
     def expired(signum, frame):
-        raise RemeshIssue("The bounded 300-second classroom meshing attempt timed out.")
+        raise RemeshIssue(f"The bounded {MAX_SECONDS}-second classroom meshing attempt timed out.")
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(MAX_SECONDS)
 
@@ -438,7 +438,7 @@ def run(value):
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(),
               "attemptMode": "native-boundary-preserved-tetra-fill", "boundaryRemeshed": False,
               "gmshAlgorithm3D": GMSH_ALGORITHM_3D, "gmshAlgorithmName": "HXT",
-              "algorithmChangeBasis": "The previous Delaunay1 fixed-boundary attempt reached its300s limit. HXT10 is the documented efficient Delaunay implementation; no geometry or source-identity gate is relaxed.",
+              "algorithmChangeBasis": "The previous Delaunay1 fixed-boundary attempt reached its 300-second limit. HXT10 is the documented efficient Delaunay implementation; no geometry or source-identity gate is relaxed. Actual HXT run38160027289 progressed through refinement into GSC optimisation at the 300-second limit; this separate attempt permits 900 seconds of bounded native work.",
               "surfaceReparametrizationPerformed": False,
               "exampleDataCommit": inventory.PIN, "gmshRequiredVersion": GMSH_VERSION, "references": REFERENCES,
               "coordinateUnits": "UNVERIFIED", "classroomScaleAssumption": {"nativeUnitsToMetres": 1, "verifiedFromSource": False,

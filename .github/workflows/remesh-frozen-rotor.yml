@@ -14,7 +14,7 @@ jobs:
   volume:
     name: FREE public runner bounded volume mesh trial
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       PIP_CONFIG_FILE: /dev/null
       PIP_INDEX_URL: https://pypi.org/simple
@@ -54,7 +54,7 @@ jobs:
           sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
             systemd-run --scope --unit="frozen-geometry-${GITHUB_RUN_ID}" \
             -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
-            /usr/bin/timeout --kill-after=10s 330s \
+            /usr/bin/timeout --kill-after=10s 930s \
             "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh"
       - name: Install checksum-pinned OpenFOAM Foundation 12
         run: bash tools/install_openfoam12.sh
@@ -91,6 +91,14 @@ jobs:
             ${{ runner.temp }}/frozen-rotor-remesh/gmsh-native-tail.json
             ${{ runner.temp }}/frozen-openfoam-case/openfoam-preparation.json
             ${{ runner.temp }}/frozen-openfoam-case/openfoam-execution.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-acceptance.json
+            ${{ runner.temp }}/frozen-openfoam-case/runtime-identity.json
+            ${{ runner.temp }}/frozen-openfoam-case/geometry-identity.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-input-manifest.json
+            ${{ runner.temp }}/frozen-openfoam-case/classroom-study.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-baseline-reduction.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.zip
+            ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.json
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
           if-no-files-found: error
           retention-days: 7

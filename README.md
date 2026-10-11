@@ -148,6 +148,14 @@ The initial volume trials have **not produced an accepted volume mesh**:
 | [38157229696](https://github.com/simcalc/PyAnsys/actions/runs/38157229696) | Surface classification merged source boundary zones; identity gate rejected the candidate. |
 | [38157560445](https://github.com/simcalc/PyAnsys/actions/runs/38157560445) | Native zone ownership was retained, but new surface reparametrization produced overlapping facets; volume generation rejected it. |
 | [38158266363](https://github.com/simcalc/PyAnsys/actions/runs/38158266363) | Exact native surface facets were preserved; Delaunay volume fill reached the 300-second limit. Its progress artifact establishes the last native stage, not a completed mesh. |
+| [38160027289](https://github.com/simcalc/PyAnsys/actions/runs/38160027289) | HXT entered native refinement and tetrahedron optimisation, then reached 300 seconds. The bounded native log tail and both unchanged source hashes are retained. The logged improving-subset counts are not accepted mesh cell counts. |
+
+The next HXT trial has a **900-second** native meshing limit based on that
+measured optimisation progress. Its owned-worker supervisor retains a small
+diagnostic tail and enforces the deadline; the workflow cgroup separately limits
+aggregate memory to 2 GiB and CPU to one core, with swap disabled. Candidate
+coordinates, boundary facets and ownership remain fixed. Extending this measured
+time budget does not establish that a candidate will pass geometry or CFD checks.
 
 The OpenFOAM adapter prepares a separate Foundation-12 SST/MRF case at the
 source's 1450 rpm and 90 kg/s. Water properties, the one-native-unit-to-one-metre

@@ -150,6 +150,62 @@ class NativeRunnerContracts(unittest.TestCase):
                 with self.subTest(field=field, patch=name):
                     self.assertIn('"' + name + '"', files["0/" + field])
 
+    def test_runtime_identity_binds_exact_package_and_six_actual_fixture_byte_records(self):
+        # Mock byte records are exclusively test fixtures, not installed native programs.
+        with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+            root = Path(temp)
+            stack.enter_context(patch.object(runner, "Path", side_effect=lambda value: Path(value).resolve()
+                                             if str(value).startswith("/opt/") else Path(value)))
+            query = stack.enter_context(patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "20250206", "")))
+            stack.enter_context(patch.object(runner.shutil, "which", side_effect=lambda program: "/opt/openfoam12/bin/" + program))
+            stack.enter_context(patch.object(runner.case_tool, "read_regular", side_effect=lambda path, limit: b"SYNTHETIC-NATIVE-BYTE-FIXTURE:" + path.name.encode()))
+            identity = runner.record_runtime_identity(root)
+            self.assertEqual(identity["packageVersion"], "20250206")
+            self.assertEqual([row["program"] for row in identity["binaries"]], list(runner.NATIVE_PROGRAMS))
+            for row in identity["binaries"]:
+                raw = b"SYNTHETIC-NATIVE-BYTE-FIXTURE:" + row["program"].encode()
+                self.assertEqual(row["bytes"], len(raw))
+                self.assertEqual(row["sha256"], sha256(raw).hexdigest())
+            self.assertEqual(json.loads((root / "runtime-identity.json").read_text()), identity)
+            query.assert_called_once()
+            self.assertFalse(identity["mainApplicationWrites"])
+
+    def test_runtime_identity_rejects_package_path_missing_and_invalid_byte_records(self):
+        for version, executable, bad_bytes in (("20250206\n", "/opt/openfoam12/bin/foamRun", False),
+                                                ("20250206", None, False),
+                                                ("20250206", "/usr/bin/foamRun", False),
+                                                ("20250206", "/opt/openfoam120/bin/foamRun", False),
+                                                ("20250206", "/opt/openfoam12/bin/foamRun", True)):
+            with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+                root = Path(temp)
+                stack.enter_context(patch.object(runner, "Path", side_effect=lambda value: Path(value).resolve()
+                                                 if str(value).startswith("/opt/") else Path(value)))
+                stack.enter_context(patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, version, "")))
+                stack.enter_context(patch.object(runner.shutil, "which", return_value=executable))
+                reader = stack.enter_context(patch.object(runner.case_tool, "read_regular", return_value=b"synthetic"))
+                if bad_bytes:
+                    reader.side_effect = runner.case_tool.CaseIssue("Synthetic oversized or empty native byte record rejected")
+                with self.subTest(version=version, executable=executable), self.assertRaises(runner.case_tool.CaseIssue):
+                    runner.record_runtime_identity(root)
+                self.assertFalse((root / "runtime-identity.json").exists())
+
+    def test_reduction_retains_immutable_native_execution_hash_for_downstream_cases(self):
+        # Synthetic byte fixture tests the evidence boundary, never pump physics.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw = b'{"status":"MRF_EXECUTED_ACCEPTANCE_REQUIRED","syntheticFixture":true}'
+            path = root / "openfoam-execution.json"
+            path.write_bytes(raw)
+            report = {"qualifiedBaseline": False}
+            result = {"qualifiedBaseline": True, "interfaceCoverageVerified": True,
+                      "qualificationScope": "SYNTHETIC CONTRACT TEST"}
+            with patch.object(runner.native_reduction, "reduce_native_baseline", return_value=result):
+                runner.reduce_and_retain(root, report)
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertTrue(report["qualifiedBaseline"])
+            reduction = root / "native-baseline-reduction.json"
+            self.assertEqual(report["nativeReduction"]["sha256"], sha256(reduction.read_bytes()).hexdigest())
+
     def run_fixture(self, root, *, fields=True, empty_field=False, post_failure=False, mesh_failed=False):
         output = root / "execution"
         def prepare(*arguments):
@@ -182,6 +238,9 @@ class NativeRunnerContracts(unittest.TestCase):
         stack.enter_context(patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "WM_PROJECT_VERSION": "12", "GITHUB_RUN_ID": "1"}))
         stack.enter_context(patch.object(runner.case_tool, "prepare", side_effect=prepare))
         stack.enter_context(patch.object(runner.case_tool, "validate_inputs", return_value=({}, "a" * 64)))
+        stack.enter_context(patch.object(runner, "record_runtime_identity", return_value={"status": "SYNTHETIC_TEST_IDENTITY"}))
+        stack.enter_context(patch.object(runner, "bind_native_manifest", return_value={"status": "SYNTHETIC_TEST_BINDING"}, create=True))
+        stack.enter_context(patch.object(runner, "reduce_and_retain", return_value={"qualifiedBaseline": False}, create=True))
         execution = stack.enter_context(patch.object(runner, "execute", side_effect=execute))
         stack.enter_context(patch.object(runner, "workspace_size", side_effect=measured_size))
         self.addCleanup(stack.close)
