@@ -601,3 +601,23 @@ files from the actual current artifact folder. It never accesses or executes
 the historical directory. A fresh native run still requires every execution
 argument to target its current independent output folder. Relocation does not
 change source bytes, manifests, numerical criteria or engineering authority.
+
+### Conditional high-pressure active cavitation reference preparation
+
+`tools/frozen_rotor_snappy_phase_case.py` prepares one new **300000 Pa absolute**
+Schnerr–Sauer reference on the same admitted approximate mesh and fixed MRF
+basis. It first re-runs the current native baseline reducer and verifies the
+complete source inventory, control hashes, coupled mesh and numerical gates.
+It copies the exact six mesh files and all bound source evidence into a fresh
+independent case. Whole-package relocation preserves the historical command
+tuple and every source checksum.
+
+The initial state is liquid fraction one, zero velocity and absolute pressure
+300000 Pa; accepted single-phase result fields are not copied as a restart.
+The declared four-to-ten-revolution trial duration does not prove stationarity,
+residence-time adequacy or time-step convergence. This preparer launches no
+solver. Actual active-phase noncavitating H0, conservation and stationarity
+must be checked before any pressure sweep uses the three-percent head-drop
+criterion. The single-phase baseline head is not active-phase H0. NPSHr,
+sliding motion, physical transient, restart and geometric accuracy remain
+unqualified. The current failed NCC mesh cannot be admitted by this helper.
