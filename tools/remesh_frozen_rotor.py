@@ -1,7 +1,7 @@
 """Bounded classroom volume remeshing of two exact official mesh boundaries.
 
 The source is read-only; native float64 coordinates/global node IDs and source
-zone ownership are checked before Gmsh reparametrizes and generates a new mesh.
+zone ownership remain fixed while Gmsh fills only the three-dimensional interior.
 This produces meshing evidence only, never a Fluent case or CFD calculation.
 """
 from __future__ import annotations
@@ -27,9 +27,11 @@ SCHEMA = "untirta.frozen-rotor-classroom-remesh.v1"
 GMSH_VERSION = "4.15.2"
 MAX_SECONDS = 300
 MAX_MEMORY_BYTES = 2 * 1024**3
-MAX_OUTPUT_BYTES = 25 * 1024**2
-MAX_NEW_CELLS_PER_COMPONENT = 200_000
-MAX_NEW_NODES_PER_COMPONENT = 150_000
+MAX_OUTPUT_BYTES = 128 * 1024**2  # Raw ASCII meshes; public ZIP budget is separate.
+MAX_NEW_CELLS_PER_COMPONENT = 800_000
+MAX_NEW_NODES_PER_COMPONENT = 500_000
+MAX_COMBINED_CELLS = 999_999
+MAX_COMBINED_NODES = 999_999
 MAX_CLASSIFIED_SURFACES = 512
 SIZING_DIVISOR = 32
 DISTANCE_SAMPLES_PER_ZONE = 64
@@ -101,6 +103,59 @@ def classified_owners(surface_triangles, owners):
     if seen != set(owners):
         raise RemeshIssue("Classification omitted native boundary triangles.")
     return dict(groups)
+
+
+def preserved_boundary(surface_triangles, owners, originals, native_points, points):
+    groups = classified_owners(surface_triangles, owners)
+    used = {node for triangles in surface_triangles.values() for triangle in triangles for node in triangle}
+    if used != set(native_points) or any(node not in points or points[node] != native_points[node] for node in used):
+        raise RemeshIssue("The preserved boundary must retain every exact native float64 node coordinate and global ID.")
+    faces = []
+    for triangles in surface_triangles.values():
+        for triangle in triangles:
+            original = originals[tuple(sorted(triangle))]
+            if tuple(triangle) not in (original, original[1:]+original[:1], original[2:]+original[:2]):
+                raise RemeshIssue("Every fixed boundary triangle must preserve its native winding.")
+            faces.append(tuple(triangle))
+    audit = boundary.audit_native_topology(faces)
+    if not audit["consistentNativeWinding"]:
+        raise RemeshIssue("The fixed native fan surface must remain closed with consistent winding.")
+    return groups, audit
+
+
+def checkpoint(progress, stage):
+    progress["stage"] = stage
+    journal = progress.setdefault("journal", [])
+    if len(journal) >= 32:
+        raise RemeshIssue("The bounded meshing attempt exceeded its progress journal budget.")
+    journal.append({"stage": stage, "component": progress.get("component"),
+                    "elapsedSeconds": round(time.monotonic()-progress["started"], 3)})
+    value = {"schemaVersion": SCHEMA, "mode": "native-boundary-preserved-tetra-fill", "stage": stage,
+             "component": progress.get("component"), "journal": journal,
+             "surfaceZoneBindings": progress.get("surfaceZoneBindings", []),
+             "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
+    target = progress["destination"] / "remesh-progress.json"
+    temporary = progress["destination"] / "remesh-progress.json.part"
+    if target.is_symlink() or temporary.exists() or temporary.is_symlink():
+        raise RemeshIssue("The attempt-owned progress journal must remain a regular file.")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(inventory.bounded_json(value))
+        temporary.replace(target)
+    finally:
+        if temporary.is_file() and not temporary.is_symlink():
+            temporary.unlink()
+
+
+def gmsh_diagnostic(gmsh, progress):
+    result = {"surfaceZoneBindings": progress.get("surfaceZoneBindings", []), "lastEntityErrors": [], "loggerTail": []}
+    if gmsh is not None and gmsh.isInitialized():
+        try:
+            result["lastEntityErrors"] = [[int(dim), int(tag)] for dim, tag in gmsh.model.mesh.getLastEntityError()[:16]]
+            result["loggerTail"] = [str(line)[:240] for line in gmsh.logger.get()[-24:]]
+        except Exception as error:
+            result["captureIssue"] = type(error).__name__
+    return result
 
 
 def partition_source_seams(surface_triangles, owners, originals):
@@ -235,7 +290,9 @@ def _quality(gmsh, cell_tags):
 
 def remesh_component(model, name, destination, gmsh, np, progress):
     component = name.split(".")[0]
-    progress.update(component=component, stage="native-boundary-validation")
+    progress["component"] = component
+    progress["surfaceZoneBindings"] = []
+    checkpoint(progress, "native-boundary-validation")
     zones, owners, native_audit = source_triangles(model)
     used = sorted({node for triangle in owners for node in triangle})
     native_points = {node: tuple(float(value) for value in model["coordinates"][node]) for node in used}
@@ -249,37 +306,21 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     for zone in zones:
         gmsh.model.mesh.addElementsByType(zone["zoneId"], 2, zone["elementIds"], [node for row in zone["triangles"] for node in row])
     gmsh.model.mesh.reclassifyNodes()
-    progress["stage"] = "classification-and-zone-binding"
-    gmsh.model.mesh.classifySurfaces(math.radians(40), True, True, math.pi)
-    surface_rows = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
-    classified_tags, classified_xyz, _ = gmsh.model.mesh.getNodes()
-    classified_points = {int(tag): tuple(float(value) for value in classified_xyz[i*3:i*3+3]) for i, tag in enumerate(classified_tags)}
-    if len(classified_tags) != len(classified_points) or classified_points != native_points:
-        raise RemeshIssue("Classification must preserve every exact float64 native coordinate and global node ID.")
     originals = {tuple(sorted(triangle)): triangle for zone in zones for triangle in zone["triangles"]}
-    original_ids = {tuple(sorted(triangle)): identifier for zone in zones for triangle, identifier in zip(zone["triangles"], zone["elementIds"])}
-    partitions = partition_source_seams(surface_rows, owners, originals)
-    # Sharp-feature classification can merge a smooth BC seam. Rebuild exact
-    # intersections with native zones, so topology creates a real shared curve.
-    progress["stage"] = "source-zone-seam-topology"
-    gmsh.model.remove()
-    gmsh.model.add(component)
-    for row in partitions:
-        gmsh.model.addDiscreteEntity(2, row["entityId"])
-    gmsh.model.mesh.addNodes(2, partitions[0]["entityId"], used, [value for node in used for value in native_points[node]])
-    for row in partitions:
-        tags = [original_ids[tuple(sorted(triangle))] for triangle in row["triangles"]]
-        gmsh.model.mesh.addElementsByType(row["entityId"], 2, tags, [node for triangle in row["triangles"] for node in triangle])
-    gmsh.model.mesh.reclassifyNodes()
+    checkpoint(progress, "fixed-native-zone-topology")
     gmsh.model.mesh.createTopology(makeSimplyConnected=True, exportDiscrete=True)
     surface_rows = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
-    groups = classified_owners(surface_rows, owners)
     topology_tags, topology_xyz, _ = gmsh.model.mesh.getNodes()
     topology_points = {int(tag): tuple(float(value) for value in topology_xyz[i*3:i*3+3]) for i, tag in enumerate(topology_tags)}
-    if len(topology_tags) != len(topology_points) or topology_points != native_points:
-        raise RemeshIssue("Seam topology must preserve every exact float64 native coordinate and global node ID.")
-    progress["stage"] = "discrete-parametrization"
-    gmsh.model.mesh.createGeometry()
+    groups, fixed_audit = preserved_boundary(surface_rows, owners, originals, native_points, topology_points)
+    if len(topology_tags) != len(topology_points):
+        raise RemeshIssue("Duplicated native global node IDs cannot define a fixed surface.")
+    zone_names = {zone["zoneId"]: zone["zoneName"] for zone in zones}
+    progress["surfaceZoneBindings"] = [{"entityId": entity, "sourceZoneId": zone, "sourceZoneName": zone_names[zone]}
+        for zone, entities in sorted(groups.items()) for entity in entities]
+    # Discrete surfaces intentionally receive no createGeometry/reparametrization.
+    # Their exact stored facets remain fixed while only the volume is filled.
+    checkpoint(progress, "fixed-boundary-volume-definition")
     loop = gmsh.model.geo.addSurfaceLoop(sorted(surface_rows))
     volume = gmsh.model.geo.addVolume([loop])
     gmsh.model.geo.synchronize()
@@ -290,10 +331,10 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     gmsh.model.setPhysicalName(3, 1, "rotating-fluid" if component == "impeller" else "stationary-fluid")
     for option, value in {"Mesh.MeshSizeMin": size, "Mesh.MeshSizeMax": size, "Mesh.MeshSizeFromPoints": 0,
                           "Mesh.MeshSizeFromCurvature": 0, "Mesh.MeshSizeExtendFromBoundary": 0,
-                          "Mesh.Algorithm": 6, "Mesh.Algorithm3D": 1, "Mesh.ElementOrder": 1,
+                          "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": 1, "Mesh.ElementOrder": 1,
                           "Mesh.MshFileVersion": 2.2, "Mesh.Binary": 0, "Mesh.SaveAll": 0}.items():
         gmsh.option.setNumber(option, value)
-    progress["stage"] = "tetrahedral-remeshing"
+    checkpoint(progress, "fixed-boundary-tetrahedral-fill")
     gmsh.model.mesh.generate(3)
     node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
     if not 4 <= len(node_tags) <= MAX_NEW_NODES_PER_COMPONENT or len(coordinates) != 3*len(node_tags):
@@ -302,28 +343,30 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     types, tag_sets, node_sets = gmsh.model.mesh.getElements(3, volume)
     if len(types) != 1 or int(types[0]) != 4 or len(node_sets[0]) != 4*len(tag_sets[0]):
         raise RemeshIssue("A nonempty linear tetrahedral volume mesh is required.")
+    if not 1 <= len(tag_sets[0]) <= MAX_NEW_CELLS_PER_COMPONENT:
+        raise RemeshIssue("The tetra-fill exceeds the fixed per-component cell budget.")
     tags = [int(tag) for tag in tag_sets[0]]
     cells = [tuple(int(node) for node in node_sets[0][i:i+4]) for i in range(0, len(node_sets[0]), 4)]
-    progress["stage"] = "quality-and-source-deviation"
+    checkpoint(progress, "quality-and-preserved-boundary-equality")
     metrics, quality = tetra_metrics(cells, points), _quality(gmsh, tags)
+    final_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
+    final_groups, final_boundary_audit = preserved_boundary(final_surfaces, owners, originals, native_points, points)
+    if final_groups != groups:
+        raise RemeshIssue("Volume fill must retain the same exact source-zone surface entities.")
     if len(cells) >= model["nativeCounts"]["cellCount"]:
         raise RemeshIssue("The classroom candidate must contain fewer volume cells than its native source component.")
     boundary_rows = []
     for zone in zones:
         triangles = [triangle for entity in groups[zone["zoneId"]] for triangle in _triangles_for_surface(gmsh, entity)]
-        source_xyz = [[native_points[node] for node in triangle] for triangle in zone["triangles"]]
         identifiers = sorted({node for triangle in triangles for node in triangle})
-        indices = sorted({round(i*(len(identifiers)-1)/(min(DISTANCE_SAMPLES_PER_ZONE, len(identifiers))-1)) for i in range(min(DISTANCE_SAMPLES_PER_ZONE, len(identifiers)))}) if len(identifiers)>1 else [0]
-        distances = [nearest_triangle_distance(points[identifiers[index]], source_xyz, np) for index in indices]
         boundary_rows.append({"sourceZoneId": zone["zoneId"], "sourceZoneName": zone["zoneName"], "physicalGroupId": zone["zoneId"],
                               "classifiedEntityIds": groups[zone["zoneId"]], "sourceTriangleCount": len(zone["triangles"]),
                               "nativeTriangleOwnershipVerifiedBeforeRemesh": True,
                               "source": patch_metrics(zone["triangles"], native_points), "generated": patch_metrics(triangles, points),
-                              "sampledBoundaryDeviation": {"sampleCount": len(distances), "maximumDistanceAssumedM": max(distances),
-                                  "rootMeanSquareDistanceAssumedM": math.sqrt(math.fsum(value*value for value in distances)/len(distances)),
-                                  "sampleRule": "Up to 64 sorted new boundary-node tags uniformly sampled; each exact nearest distance searches all same-zone native triangles.",
-                                  "fullHausdorffDistanceVerified": False}})
-    progress["stage"] = "msh2-publication"
+                              "boundaryEquality": {"everyNativeTriangleAndBoundaryNodeChecked": True, "nativeBoundaryNodeCount": len(identifiers),
+                                  "maximumCoordinateDifferenceNativeUnits": 0, "nativeWindingPreserved": True,
+                                  "method": "Complete exact native node-ID/float64 coordinate and oriented triangle-triplet equality; no sampled projection or tag guess."}})
+    checkpoint(progress, "msh2-publication")
     target = destination / (component + ".msh")
     if target.exists() or target.is_symlink():
         raise RemeshIssue("A generated mesh cannot overwrite an existing output.")
@@ -333,13 +376,18 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     with target.open("rb") as stream:
         if stream.read(32).splitlines()[:2] != [b"$MeshFormat", b"2.2 0 8"]:
             raise RemeshIssue("The converter input must use actual MSH2.2 ASCII storage.")
-    digest = sha256(target.read_bytes()).hexdigest()
-    result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest, "format": "gmsh-msh2.2-ascii"},
+    digest = sha256()
+    with target.open("rb") as stream:
+        while part := stream.read(1024**2):
+            digest.update(part)
+    result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest.hexdigest(), "format": "gmsh-msh2.2-ascii"},
               "sourceCellCount": model["nativeCounts"]["cellCount"], "sourceNodeCount": model["nativeCounts"]["nodeCount"],
               "generatedCellCount": len(cells), "generatedNodeCount": len(points), "sourceBoundaryAudit": native_audit,
-              "sourceSeamPartition": {"method": "Exact native triangle-triplet ownership intersection with classified geometric surfaces; rebuilt discrete entities and createTopology(True,True)",
-                  "partitionCount": len(partitions), "finalSurfaceEntityCount": len(surface_rows), "completeNativeTriangleCoverageVerified": True,
+              "sourceSeamPartition": {"method": "Exact native-zone discrete surfaces and createTopology(True,True); all original facets fixed with MeshOnlyEmpty=1 and no surface reparametrization",
+                  "partitionCount": len(zones), "finalSurfaceEntityCount": len(surface_rows), "completeNativeTriangleCoverageVerified": True,
                   "mixedSourceZoneEntityCount": 0, "nativeGlobalNodeCoordinatesVerified": True, "nearestTagGuessPerformed": False},
+              "fixedNativeFanBoundaryAudit": fixed_audit, "finalPreservedBoundaryAudit": final_boundary_audit,
+              "boundaryRemeshed": False, "surfaceReparametrizationPerformed": False,
               "sourceBoundaryBoundsAssumedM": native_box, "generatedBoundsAssumedM": bounds(list(points.values())),
               "cellMetrics": metrics, "gmshQuality": quality, "boundaryZones": boundary_rows,
               "volumePhysicalGroup": "rotating-fluid" if component == "impeller" else "stationary-fluid",
@@ -368,21 +416,28 @@ def enforce_runtime_limits():
 
 def run(value):
     destination = checked_output(value)
-    started, progress = time.monotonic(), {"component": None, "stage": "runtime-preflight"}
+    started = time.monotonic()
+    progress = {"component": None, "stage": "runtime-preflight", "started": started, "destination": destination}
     destination.mkdir(parents=True)
+    checkpoint(progress, "runtime-preflight")
+    cache = destination.parent / "frozen-rotor-mesh-inputs"
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(),
+              "attemptMode": "native-boundary-preserved-tetra-fill", "boundaryRemeshed": False,
+              "surfaceReparametrizationPerformed": False,
               "exampleDataCommit": inventory.PIN, "gmshRequiredVersion": GMSH_VERSION, "references": REFERENCES,
               "coordinateUnits": "UNVERIFIED", "classroomScaleAssumption": {"nativeUnitsToMetres": 1, "verifiedFromSource": False,
                   "label": "Explicit teaching assumption: one native coordinate unit equals one metre; physical interpretation requires unit verification."},
               "limits": {"threads": 1, "maximumSeconds": MAX_SECONDS, "maximumAddressSpaceBytes": MAX_MEMORY_BYTES,
                   "maximumOutputBytes": MAX_OUTPUT_BYTES, "maximumReportBytes": inventory.MAX_REPORT_BYTES,
-                  "maximumCellsPerComponent": MAX_NEW_CELLS_PER_COMPONENT, "maximumNodesPerComponent": MAX_NEW_NODES_PER_COMPONENT},
+                  "maximumCellsPerComponent": MAX_NEW_CELLS_PER_COMPONENT, "maximumNodesPerComponent": MAX_NEW_NODES_PER_COMPONENT,
+                  "maximumCombinedCells": MAX_COMBINED_CELLS, "maximumCombinedNodes": MAX_COMBINED_NODES,
+                  "rawOutputBudgetChange": "128 MiB raw MSH2 ASCII trial budget; compressed publication budget is separately enforced."},
               "sources": [], "meshes": [], "files": [], "status": "PREPARATION_REQUIRED", "volumeMeshGenerated": False,
               "originalMeshesImmutable": False, "nativeCoordinateUnitsVerified": False, "sourceGeometryFabricated": False,
               "nodeWeldingPerformed": False, "topologyHealingPerformed": False, "nativeCaseGenerated": False,
               "fluentSessionConnected": False, "licenseVerified": False, "actualCfdRunVerified": False,
               "simulationExecuted": False, "mainApplicationWrites": False, "openFoamConversionVerified": False,
-              "claimBoundary": "Classroom remeshing only. Native units unverified; separate components and source patches preserved. OpenFOAM conversion, coupled interface, wall resolution, solver setup and CFD validation remain separate stages."}
+              "claimBoundary": "Classroom tetrahedral volume fill only; all native boundary facets remain fixed. Native units unverified; separate components and source patches preserved. OpenFOAM conversion, coupled interface, wall resolution, solver setup and CFD validation remain separate stages."}
     gmsh = None
     try:
         enforce_runtime_limits()
@@ -393,31 +448,39 @@ def run(value):
             raise RemeshIssue("Install exactly the pinned Gmsh version on the public worker.")
         gmsh.initialize([], readConfigFiles=False, run=False)
         gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.logger.start()
         for option in ("General.NumThreads", "Mesh.MaxNumThreads1D", "Mesh.MaxNumThreads2D", "Mesh.MaxNumThreads3D"):
             gmsh.option.setNumber(option, 1)
         report["gmshVersion"] = gmsh.__version__
-        cache = destination.parent / "frozen-rotor-mesh-inputs"
         if cache.is_symlink() or getattr(cache, "is_junction", lambda: False)():
             raise RemeshIssue("Source cache must be a regular isolated runner directory.")
         cache.mkdir(exist_ok=True)
         for name in inventory.MESH_NAMES:
-            progress.update(component=name.split(".")[0], stage="verified-native-source-read")
+            progress["component"] = name.split(".")[0]
+            checkpoint(progress, "verified-native-source-transfer")
             source = inventory.download_mesh(cache, name)
             provenance = inventory.verify_file(source, name)
-            model = boundary.read_native_mesh(source)
             report["sources"].append(provenance)
+        for name in inventory.MESH_NAMES:
+            progress["component"] = name.split(".")[0]
+            checkpoint(progress, "verified-native-source-read")
+            source = cache / name
+            model = boundary.read_native_mesh(source)
             report["meshes"].append(remesh_component(model, name, destination, gmsh, np, progress))
             inventory.verify_file(source, name)
         report["files"] = [mesh["generatedFile"] for mesh in report["meshes"]]
-        if sum(row["bytes"] for row in report["files"]) > MAX_OUTPUT_BYTES-inventory.MAX_REPORT_BYTES:
-            raise RemeshIssue("The combined meshes exceed the fixed 25 MiB publication budget.")
+        if sum(row["bytes"] for row in report["files"]) > MAX_OUTPUT_BYTES-2*inventory.MAX_REPORT_BYTES:
+            raise RemeshIssue("The combined meshes exceed the fixed 128 MiB raw output budget.")
+        if sum(mesh["generatedCellCount"] for mesh in report["meshes"]) > MAX_COMBINED_CELLS or sum(mesh["generatedNodeCount"] for mesh in report["meshes"]) > MAX_COMBINED_NODES:
+            raise RemeshIssue("The combined classroom candidate must remain below one million cells and nodes.")
         if sum(mesh["generatedCellCount"] for mesh in report["meshes"]) >= sum(mesh["sourceCellCount"] for mesh in report["meshes"]):
             raise RemeshIssue("The combined generated classroom mesh must be lighter than the source mesh.")
         report.update(status="VOLUME_MESH_GENERATED", volumeMeshGenerated=True, originalMeshesImmutable=True)
-        progress["stage"] = "completed"
+        checkpoint(progress, "completed")
     except Exception as error:
         report.update(status="PREPARATION_REQUIRED", volumeMeshGenerated=False, reasonCode="CFD_CLASSROOM_REMESH_REQUIRED",
-                      diagnostic={"stage": progress["stage"], "component": progress["component"], "type": type(error).__name__, "message": str(error)[:500]},
+                      diagnostic={"stage": progress["stage"], "component": progress["component"], "type": type(error).__name__, "message": str(error)[:500],
+                                  **gmsh_diagnostic(gmsh, progress)},
                       correctiveAction="Review the exact failed meshing stage and source-zone constraints before a separate bounded retry.")
         report["meshes"], report["files"] = [], []
         for name in ("impeller.msh", "volute.msh"):
@@ -428,7 +491,28 @@ def run(value):
         if sys.platform == "linux":
             signal.alarm(0)
         if gmsh is not None and gmsh.isInitialized():
-            gmsh.finalize()
+            try:
+                gmsh.finalize()
+            except Exception as error:
+                report["finalizeIssue"] = type(error).__name__
+    report["postAttemptSourceVerification"] = []
+    for name in inventory.MESH_NAMES:
+        before = next((row["sha256"] for row in report["sources"] if row["name"] == name), None)
+        try:
+            after = inventory.verify_file(cache/name, name)
+            report["postAttemptSourceVerification"].append({"name": name, "beforeSha256": before, "afterSha256": after["sha256"],
+                                                          "immutableVerified": before == after["sha256"]})
+        except (inventory.InspectionIssue, OSError):
+            report["postAttemptSourceVerification"].append({"name": name, "beforeSha256": before, "afterSha256": None, "immutableVerified": False})
+    report["originalMeshesImmutable"] = all(row["immutableVerified"] for row in report["postAttemptSourceVerification"])
+    if report["volumeMeshGenerated"] and not report["originalMeshesImmutable"]:
+        report.update(status="PREPARATION_REQUIRED", volumeMeshGenerated=False, reasonCode="CFD_NATIVE_SOURCE_IMMUTABILITY_REQUIRED")
+        report["meshes"], report["files"] = [], []
+        for name in ("impeller.msh", "volute.msh"):
+            target = destination/name
+            if target.is_file() and not target.is_symlink():
+                target.unlink()
+    report["progressJournal"] = progress["journal"]
     report["elapsedSeconds"] = round(time.monotonic()-started, 3)
     for env, key, pattern in (("GITHUB_RUN_ID", "githubRunId", r"[0-9]{1,24}"), ("GITHUB_SHA", "githubSourceCommit", r"[0-9a-f]{40}")):
         raw = os.environ.get(env, "")

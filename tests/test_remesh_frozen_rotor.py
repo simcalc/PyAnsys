@@ -4,7 +4,9 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -106,15 +108,57 @@ class RemeshContracts(unittest.TestCase):
             with patch.object(remesh,"enforce_runtime_limits",side_effect=remesh.RemeshIssue("Synthetic preflight rejection")):
                 summary=remesh.run(target)
             self.assertFalse(summary["volumeMeshGenerated"])
-            self.assertEqual([path.name for path in target.iterdir()],["remesh-report.json"])
+            self.assertEqual(sorted(path.name for path in target.iterdir()),["remesh-progress.json","remesh-report.json"])
             report=json.loads((target/"remesh-report.json").read_text())
             self.assertEqual(report["diagnostic"]["stage"],"runtime-preflight")
             self.assertEqual(report["status"],"PREPARATION_REQUIRED")
             self.assertFalse(report["classroomScaleAssumption"]["verifiedFromSource"])
             self.assertEqual(report["coordinateUnits"],"UNVERIFIED")
             self.assertEqual(report["files"],[])
+            self.assertEqual(report["progressJournal"][0]["stage"],"runtime-preflight")
+            self.assertFalse(report["originalMeshesImmutable"])
             for flag in ("actualCfdRunVerified","simulationExecuted","nativeCaseGenerated","mainApplicationWrites","openFoamConversionVerified"):
                 self.assertIs(report[flag],False)
+
+    def test_fixed_boundary_requires_full_native_coordinate_identity_and_winding(self):
+        _,owners,_=remesh.source_triangles(self.model())
+        originals={tuple(sorted(row)):row for row in FACES}
+        groups={11:FACES[:2],12:FACES[2:]}
+        mapped,audit=remesh.preserved_boundary(groups,owners,originals,POINTS,{**POINTS,99:(.1,.1,.1)})
+        self.assertEqual(mapped,{11:[11],12:[12]})
+        self.assertTrue(audit["consistentNativeWinding"])
+        changed={**POINTS,1:(.000001,0,0)}
+        with self.assertRaisesRegex(remesh.RemeshIssue,"float64"):
+            remesh.preserved_boundary(groups,owners,originals,POINTS,changed)
+        with self.assertRaisesRegex(remesh.RemeshIssue,"winding"):
+            remesh.preserved_boundary({11:[tuple(reversed(FACES[0])),FACES[1]],12:FACES[2:]},owners,originals,POINTS,POINTS)
+
+    def test_failed_fill_removes_partial_mesh_and_verifies_both_original_hashes_after_attempt(self):
+        native=SimpleNamespace(__version__=remesh.GMSH_VERSION, initialize=lambda *a,**k:None,
+            option=SimpleNamespace(setNumber=lambda *a:None), logger=SimpleNamespace(start=lambda:None,get=lambda:["Synthetic meshing diagnostic"]),
+            model=SimpleNamespace(mesh=SimpleNamespace(getLastEntityError=lambda:[])),isInitialized=lambda:True,finalize=lambda:None)
+        def transferred(directory,name):
+            target=directory/name
+            target.write_bytes(b"Synthetic read-only input placeholder")
+            return target
+        def verified(path,name): return {"name":name,"bytes":1,"sha256":"a"*64,"sourceUrl":remesh.inventory.mesh_url(name)}
+        def failed_fill(model,name,destination,gmsh,np,progress):
+            (destination/"impeller.msh").write_bytes(b"Invalid partial mesh must be removed")
+            progress["stage"]="fixed-boundary-tetrahedral-fill"
+            raise remesh.RemeshIssue("Synthetic fill failure")
+        with TemporaryDirectory() as root, patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False),patch.dict(sys.modules,{"gmsh":native}):
+            target=Path(root)/"new-remesh"
+            with patch.object(remesh,"enforce_runtime_limits"),patch.object(remesh.inventory,"download_mesh",side_effect=transferred),\
+                 patch.object(remesh.inventory,"verify_file",side_effect=verified) as checksum,\
+                 patch.object(remesh.boundary,"read_native_mesh",return_value={}),patch.object(remesh,"remesh_component",side_effect=failed_fill):
+                summary=remesh.run(target)
+            report=json.loads((target/"remesh-report.json").read_text())
+            self.assertFalse(summary["volumeMeshGenerated"])
+            self.assertFalse((target/"impeller.msh").exists())
+            self.assertTrue(report["originalMeshesImmutable"])
+            self.assertEqual(checksum.call_count,4)
+            self.assertEqual(len(report["postAttemptSourceVerification"]),2)
+            self.assertEqual(report["diagnostic"]["loggerTail"],["Synthetic meshing diagnostic"])
 
     def test_output_rejects_existing_or_outside_before_runtime(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as outside, patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):

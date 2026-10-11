@@ -1,0 +1,418 @@
+"""Prepare a separate Foundation-12 classroom pump case; never launch a solver.
+
+Native conversion verification reads actual ASCII polyMesh and converter logs.
+Preparation, conversion and an iteration-limited run do not establish a
+converged pump baseline, NPSH3, physical transient or manufacturer performance.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from hashlib import sha256
+import json
+import math
+from pathlib import Path
+import re
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import inspect_frozen_rotor_mesh as inventory
+
+SCHEMA = "untirta.frozen-rotor-openfoam-preparation.v1"
+MAX_MESH_BYTES = 128 * 1024**2
+MAX_NATIVE_BYTES = 128 * 1024**2
+MAX_COMPONENT_NODES = 500_000
+MAX_COMPONENT_CELLS = 800_000
+MAX_COMBINED_CELLS = 1_000_000
+MAX_COMBINED_NODES = 1_000_000
+COORDINATE_TOLERANCE = 1e-11  # Explicit tolerance for native 12+ significant-digit ASCII.
+MAX_ITERATIONS = 500
+RHO, MU, G, RPM, P_ABSOLUTE = 998.2, 0.001002, 9.81, 1450, 101325
+Q = 90 / RHO
+ROTATING = {"blade", "impeller-hub", "impeller-shroud"}
+STATIONARY = {"inblock-hub", "inblock-shroud", "volute-inlet-wall", "volute-wall"}
+INTERFACES = {"interface-impeller-outlet", "interface-volute-inlet"}
+PATCHES = {"impeller": {"inlet", *ROTATING, "inblock-hub", "inblock-shroud", "interface-impeller-outlet"},
+           "volute": {"mass-flow-inlet-11", "volute-wall", "volute-inlet-wall", "interface-volute-inlet"}}
+
+
+class CaseIssue(ValueError):
+    pass
+
+
+def regular_directory(value):
+    value = Path(value).absolute()
+    if not value.is_dir():
+        raise CaseIssue("An existing regular independent input directory is required.")
+    for item in (value, *value.parents):
+        if item.is_symlink() or getattr(item, "is_junction", lambda: False)():
+            raise CaseIssue("Input directories cannot contain links or junctions.")
+    return value
+
+
+def read_regular(value, limit):
+    value = Path(value)
+    if value.is_symlink() or not value.is_file() or not 0 < value.stat().st_size <= limit:
+        raise CaseIssue("A regular bounded evidence file is required: " + value.name)
+    return value.read_bytes()
+
+
+def finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise CaseIssue("A finite real engineering value is required.")
+    return value
+
+
+def msh_inventory(raw):
+    """Validate the actual supported MSH2.2 nodes, linear cells and exact tags."""
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError as error:
+        raise CaseIssue("Actual MSH2.2 ASCII is required.") from error
+    sections = {}
+    for match in re.finditer(r"(?m)^\$(\w+)\s*\n(.*?)^\$End\1\s*$", text, re.S):
+        if match[1] in sections:
+            raise CaseIssue("Duplicate MSH sections are unsupported.")
+        sections[match[1]] = match[2].strip().splitlines()
+    if set(sections) != {"MeshFormat", "PhysicalNames", "Nodes", "Elements"} or sections["MeshFormat"] != ["2.2 0 8"]:
+        raise CaseIssue("Use a linear Gmsh MSH2.2 ASCII file with explicit physical names.")
+    physical = {}
+    for row in sections["PhysicalNames"][1:]:
+        match = re.fullmatch(r'(2|3) (\d+) "([A-Za-z0-9_-]+)"', row.strip())
+        if not match:
+            raise CaseIssue("Safe exact physical group names are required.")
+        key = (int(match[1]), int(match[2]))
+        if key in physical:
+            raise CaseIssue("Physical groups must be unique.")
+        physical[key] = match[3]
+    if len(physical) != int(sections["PhysicalNames"][0]):
+        raise CaseIssue("The physical-name count must match its actual records.")
+    # Foundation gmshToFoam uses one physical-name map across dimensions.
+    if len({key[1] for key in physical}) != len(physical):
+        raise CaseIssue("Physical tags must be globally unique for Foundation gmshToFoam.")
+    nodes = {}
+    for row in sections["Nodes"][1:]:
+        values = row.split()
+        if len(values) != 4:
+            raise CaseIssue("Every node needs an integer ID and three coordinates.")
+        node = int(values[0])
+        coordinates = tuple(float(value) for value in values[1:])
+        if node <= 0 or node in nodes or not all(math.isfinite(value) for value in coordinates):
+            raise CaseIssue("Node IDs must be unique and coordinates finite.")
+        nodes[node] = coordinates
+    if not nodes or len(nodes) != int(sections["Nodes"][0]) or len(nodes) > MAX_COMPONENT_NODES:
+        raise CaseIssue("The actual node count differs from the bounded MSH declaration.")
+    counts, used, element_ids, connectivity_seen, cells = {}, set(), set(), set(), 0
+    for row in sections["Elements"][1:]:
+        values = [int(value) for value in row.split()]
+        if len(values) < 8 or values[0] <= 0 or values[0] in element_ids or values[1] not in (2, 4) or values[2] < 2:
+            raise CaseIssue("Only unique linear triangle and tetrahedron elements with physical tags are supported.")
+        element_ids.add(values[0])
+        dimension, expected = (2, 3) if values[1] == 2 else (3, 4)
+        connectivity = values[3 + values[2]:]
+        key = (dimension, values[3])
+        if key not in physical or len(connectivity) != expected or len(set(connectivity)) != expected or any(node not in nodes for node in connectivity):
+            raise CaseIssue("Every element must preserve its physical group and valid distinct node references.")
+        canonical = (dimension, tuple(sorted(connectivity)))
+        if canonical in connectivity_seen:
+            raise CaseIssue("Duplicate triangles or tetrahedra cannot preserve native identity.")
+        connectivity_seen.add(canonical)
+        xyz = [nodes[node] for node in connectivity]
+        ab = [xyz[1][i]-xyz[0][i] for i in range(3)]
+        ac = [xyz[2][i]-xyz[0][i] for i in range(3)]
+        cross = (ab[1]*ac[2]-ab[2]*ac[1], ab[2]*ac[0]-ab[0]*ac[2], ab[0]*ac[1]-ab[1]*ac[0])
+        if not math.isfinite(math.hypot(*cross)) or math.hypot(*cross) <= 0:
+            raise CaseIssue("Actual surface/volume elements cannot have degenerate triangle geometry.")
+        if dimension == 3:
+            ad = [xyz[3][i]-xyz[0][i] for i in range(3)]
+            determinant = math.fsum(cross[i]*ad[i] for i in range(3))
+            if not math.isfinite(determinant) or determinant <= 0:
+                raise CaseIssue("Actual MSH tetrahedra need finite positive signed volume.")
+        used.update(connectivity)
+        name = physical[key]
+        counts[name] = counts.get(name, 0) + 1
+        cells += dimension == 3
+    if len(element_ids) != int(sections["Elements"][0]) or used != set(nodes) or not 0 < cells <= MAX_COMPONENT_CELLS:
+        raise CaseIssue("All MSH nodes/elements and a bounded nonempty volume must be accounted for.")
+    volumes = [name for (dimension, _), name in physical.items() if dimension == 3]
+    if len(volumes) != 1:
+        raise CaseIssue("One exact fluid volume is required in each component.")
+    return {"nodeCount": len(nodes), "cellCount": cells, "patchFaces": {name: count for name, count in counts.items() if name != volumes[0]},
+            "cellZone": volumes[0], "nodeCoordinatesInFileOrder": list(nodes.values())}
+
+
+def validate_inputs(directory):
+    directory = regular_directory(directory)
+    raw = read_regular(directory / "remesh-report.json", inventory.MAX_REPORT_BYTES)
+    report = json.loads(raw)
+    for key, expected in {"schemaVersion": "untirta.frozen-rotor-classroom-remesh.v1", "exampleDataCommit": inventory.PIN,
+                          "status": "VOLUME_MESH_GENERATED", "volumeMeshGenerated": True, "originalMeshesImmutable": True,
+                          "simulationExecuted": False, "actualCfdRunVerified": False, "mainApplicationWrites": False}.items():
+        if report.get(key) != expected:
+            raise CaseIssue("An actual successful source-pinned remeshing report is required: " + key)
+    assumption = report.get("classroomScaleAssumption", {})
+    if assumption.get("nativeUnitsToMetres") != 1 or assumption.get("verifiedFromSource") is not False:
+        raise CaseIssue("Preserve the explicitly unverified one-unit-to-one-metre classroom assumption.")
+    sources = report.get("sources", [])
+    if len(sources) != 2 or {row.get("name") for row in sources} != set(inventory.MESH_NAMES):
+        raise CaseIssue("Both immutable official source meshes must be bound.")
+    for source in sources:
+        expected_bytes, expected_hash = inventory.FILES[source["name"]]
+        if source.get("bytes") != expected_bytes or source.get("sha256") != expected_hash:
+            raise CaseIssue("An immutable official source pin differs.")
+    rows = report.get("meshes", [])
+    if len(rows) != 2 or {row.get("sourceMesh") for row in rows} != set(inventory.MESH_NAMES):
+        raise CaseIssue("Two actual remeshed component records are required.")
+    if sum(finite_number(row.get("generatedFile", {}).get("bytes")) for row in rows) > MAX_MESH_BYTES:
+        raise CaseIssue("Combined actual generated meshes exceed the bounded 128 MiB input budget.")
+    result = {}
+    for row in rows:
+        component = row["sourceMesh"].split(".")[0]
+        metadata = row.get("generatedFile", {})
+        if metadata.get("name") != component + ".msh" or metadata.get("format") != "gmsh-msh2.2-ascii":
+            raise CaseIssue("Use only the two exact generated MSH component filenames.")
+        mesh = read_regular(directory / metadata["name"], MAX_MESH_BYTES)
+        if len(mesh) != metadata.get("bytes") or sha256(mesh).hexdigest() != metadata.get("sha256"):
+            raise CaseIssue("Generated MSH size or checksum differs from its actual report.")
+        actual = msh_inventory(mesh)
+        expected_zone = "rotating-fluid" if component == "impeller" else "stationary-fluid"
+        if set(actual["patchFaces"]) != PATCHES[component] or actual["cellZone"] != expected_zone:
+            raise CaseIssue("Native patch and component identities must survive remeshing exactly.")
+        if actual["nodeCount"] != row.get("generatedNodeCount") or actual["cellCount"] != row.get("generatedCellCount"):
+            raise CaseIssue("Actual MSH counts differ from the remeshing evidence.")
+        source_cells = 773352 if component == "impeller" else 368411
+        if actual["cellCount"] >= source_cells:
+            raise CaseIssue("The actual generated component must contain fewer cells than its immutable source.")
+        zones = row.get("boundaryZones", [])
+        expected_faces = {zone.get("sourceZoneName"): zone.get("generated", {}).get("triangleCount") for zone in zones}
+        if expected_faces != actual["patchFaces"]:
+            raise CaseIssue("Actual MSH boundary counts differ from the exact remeshed source-zone records.")
+        result[component] = {"path": str(directory / metadata["name"]), "sha256": metadata["sha256"], **actual}
+    if sum(row["cellCount"] for row in result.values()) >= MAX_COMBINED_CELLS or sum(row["nodeCount"] for row in result.values()) >= MAX_COMBINED_NODES:
+        raise CaseIssue("Actual combined generated cells and nodes must remain below one million.")
+    return result, sha256(raw).hexdigest()
+
+
+def foam_header(name, kind="dictionary", location=None):
+    return "FoamFile\n{\n    version 2.0;\n    format ascii;\n    class " + kind + ";\n" + ("    location \"" + location + "\";\n" if location else "") + "    object " + name + ";\n}\n"
+
+
+def field(name, dimension, initial, patches):
+    kind = "volVectorField" if name == "U" else "volScalarField"
+    return foam_header(name, kind, "0") + "dimensions [" + dimension + "];\ninternalField uniform " + initial + ";\nboundaryField\n{\n    #includeEtc \"caseDicts/setConstraintTypes\"\n" + "".join("    \"" + patch + "\"\n    {\n        " + body + "\n    }\n" for patch, body in sorted(patches.items())) + "}\n"
+
+
+def function_objects():
+    # Foundation12 uses select/average+weightField, not regionType/weightedAverage.
+    blocks = ["totalPressurePa {type pressure; libs (\"libfieldFunctionObjects.so\"); field p; U U; rho rhoInf; rhoInf 998.2; calcTotal yes; pRef 101325; calcCoeff no; result totalPressurePa; executeControl timeStep; executeInterval 1; writeControl writeTime;}",
+              "gaugeStaticPressurePa {type pressure; libs (\"libfieldFunctionObjects.so\"); field p; rho rhoInf; rhoInf 998.2; calcTotal no; calcCoeff no; result staticPressurePa; executeControl timeStep; executeInterval 1; writeControl writeTime;}",
+              "absoluteVelocitySquared {type magSqr; libs (\"libfieldFunctionObjects.so\"); field U; result U2; executeControl timeStep; executeInterval 1; writeControl writeTime;}"]
+    for suffix, patch in (("Inlet", "inlet"), ("Outlet", "mass-flow-inlet-11")):
+        common = 'type surfaceFieldValue; libs ("libfieldFunctionObjects.so"); select patch; name ' + patch + '; writeFields false; executeControl timeStep; executeInterval 1; writeControl timeStep; writeInterval 1; log false; '
+        blocks.append("flow" + suffix + " {" + common + "operation sum; fields (phi);}")
+        blocks.append("flowMagnitude" + suffix + " {" + common + "operation sumMag; fields (phi);}")
+        blocks.append("weighted" + suffix + " {" + common + "operation average; weightField phi; fields (p totalPressurePa U2);}")
+    return "\n".join(blocks) + "\n"
+
+
+def case_files(component):
+    names = PATCHES[component]
+    u, p, k, omega, nut = {}, {}, {}, {}, {}
+    for name in names:
+        if name == "inlet":
+            u[name] = "type pressureInletOutletVelocity; value uniform (0 0 0);"
+            p[name] = "type totalPressure; p0 uniform 0; value uniform 0;"
+            k[name], omega[name] = "type fixedValue; value uniform 0.375;", "type fixedValue; value uniform 100;"
+            nut[name] = "type calculated; value uniform 0;"
+        elif name == "mass-flow-inlet-11":
+            u[name] = "type flowRateOutletVelocity; volumetricFlowRate " + format(Q, ".17g") + "; value uniform (0 0 0);"
+            p[name] = "type zeroGradient;"
+            k[name], omega[name], nut[name] = "type zeroGradient;", "type zeroGradient;", "type calculated; value uniform 0;"
+        elif name in INTERFACES:
+            u[name], p[name], k[name], omega[name], nut[name] = "type slip;", "type zeroGradient;", "type zeroGradient;", "type zeroGradient;", "type calculated; value uniform 0;"
+        else:
+            u[name] = "type MRFnoSlip;" if name in ROTATING else "type noSlip;"
+            p[name] = "type fixedFluxPressure;"
+            k[name], omega[name], nut[name] = "type kqRWallFunction; value uniform 0.375;", "type omegaWallFunction; value uniform 100;", "type nutkWallFunction; value uniform 0;"
+    result = {"0/U": field("U", "0 1 -1 0 0 0 0", "(0 0 0)", u), "0/p": field("p", "0 2 -2 0 0 0 0", "0", p),
+              "0/k": field("k", "0 2 -2 0 0 0 0", "0.375", k), "0/omega": field("omega", "0 0 -1 0 0 0 0", "100", omega),
+              "0/nut": field("nut", "0 2 -1 0 0 0 0", "0", nut),
+              "constant/physicalProperties": foam_header("physicalProperties") + "viscosityModel constant;\nnu [0 2 -1 0 0 0 0] " + format(MU/RHO, ".17g") + ";\n",
+              "constant/momentumTransport": foam_header("momentumTransport") + "simulationType RAS;\nRAS {model kOmegaSST; turbulence on; printCoeffs on;}\n",
+              "system/fvSchemes": foam_header("fvSchemes") + "ddtSchemes {default steadyState;}\ngradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1;}\ndivSchemes {default none; div(phi,U) bounded Gauss limitedLinearV 1; div(phi,k) bounded Gauss limitedLinear 1; div(phi,omega) bounded Gauss limitedLinear 1; div((nuEff*dev2(T(grad(U))))) Gauss linear;}\nlaplacianSchemes {default Gauss linear limited corrected 0.5;}\ninterpolationSchemes {default linear;}\nsnGradSchemes {default limited corrected 0.5;}\n",
+              "system/fvSolution": foam_header("fvSolution") + "solvers {p {solver GAMG; tolerance 1e-8; relTol 0.05; smoother GaussSeidel;} \"(U|k|omega)\" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-7; relTol 0.1;}}\nSIMPLE {nNonOrthogonalCorrectors 2;}\nrelaxationFactors {fields {p 0.3;} equations {U 0.5; k 0.5; omega 0.5;}}\n",
+              "system/controlDict": foam_header("controlDict") + "application foamRun;\nsolver incompressibleFluid;\nstartFrom startTime;\nstartTime 0;\nstopAt endTime;\nendTime 500;\ndeltaT 1;\nwriteControl timeStep;\nwriteInterval 500;\npurgeWrite 1;\nwriteFormat ascii;\nwritePrecision 17;\nwriteCompression off;\ntimeFormat general;\ntimePrecision 12;\nrunTimeModifiable false;\nfunctions\n{\n" + (function_objects() if component == "impeller" else "") + "}\n",
+              "system/changeDictionaryDict": foam_header("changeDictionaryDict") + "boundary\n{\n" + "".join('    \"' + name + '\" {type wall;}\n' for name in sorted(names & (ROTATING | STATIONARY))) + "}\n"}
+    if component == "impeller":
+        result["constant/MRFProperties"] = foam_header("MRFProperties") + "rotor {cellZone rotating-fluid; origin (0 0 0); axis (0 0 1); omega 1450 [rpm];}\n"
+        result["system/createNonConformalCouplesDict"] = foam_header("createNonConformalCouplesDict") + "nonConformalCouples {pumpInterface {patches (interface-impeller-outlet interface-volute-inlet); transform none;}}\n"
+    return result
+
+
+def write_exclusive(path, raw):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as stream:
+        stream.write(raw)
+
+
+def prepare(mesh_directory, output_directory):
+    meshes, remesh_hash = validate_inputs(mesh_directory)
+    output = Path(output_directory).absolute()
+    inventory.output_path(output / "openfoam-preparation.json")
+    if output.exists() or output.is_symlink():
+        raise CaseIssue("Use a fresh RUNNER_TEMP case output directory.")
+    output.mkdir(parents=True)
+    records, commands = [], []
+    for component in ("impeller", "volute"):
+        case = output / (component + "-case")
+        for name, content in case_files(component).items():
+            write_exclusive(case / name, content.encode("ascii"))
+        target = case / (component + ".msh")
+        write_exclusive(target, read_regular(meshes[component]["path"], MAX_MESH_BYTES))
+        commands.extend([["gmshToFoam", "-case", str(case), str(target)], ["changeDictionary", "-case", str(case)]])
+        records.append({"component": component, "caseDirectory": str(case), "meshSha256": meshes[component]["sha256"],
+                        **{key: meshes[component][key] for key in ("nodeCount", "cellCount", "patchFaces", "cellZone")}})
+    main_case, other_case = output / "impeller-case", output / "volute-case"
+    commands.extend([["mergeMeshes", "-case", str(main_case), "-addCases", '("' + str(other_case) + '")', "-overwrite"],
+                     ["createNonConformalCouples", "-case", str(main_case), "-overwrite"],
+                     ["checkMesh", "-case", str(main_case), "-allGeometry", "-allTopology"], ["foamRun", "-case", str(main_case)]])
+    report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(), "remeshReportSha256": remesh_hash,
+              "exampleDataCommit": inventory.PIN, "status": "CASE_PREPARED_NATIVE_EXECUTION_REQUIRED", "components": records,
+              "nativeCommandArguments": commands, "commandExecutionPerformedByThisTool": False,
+              "requiredConversionGate": "Verify actual converter logs, points/faces/owner/neighbour/boundary/cellZones before merge; verify merged counts and NCC coverage before the solver.",
+              "limits": {"iterations": MAX_ITERATIONS, "cpus": 1, "memoryBytes": 2*1024**3, "maximumSeconds": 1200, "maximumWorkspaceBytes": 512*1024**2,
+                         "enforcementOwner": "Independent root workflow cgroup/timeout/output guard; this preparation tool does not launch native processes."},
+              "classroomAssumptions": {"metresPerNativeUnit": 1, "nativeUnitsVerified": False, "rhoKgM3": RHO, "muPaS": MU, "gMS2": G,
+                  "speedRpm": RPM, "axis": [0,0,1], "massFlowKgS": 90, "volumetricFlowM3S": Q, "externalTotalPressureAbsolutePa": P_ABSOLUTE,
+                  "kinematicGaugePressureDefinition": "pAbsolutePa=998.2*pKinematic+101325; inlet external total gauge pressure=0 m2/s2.",
+                  "inletTurbulence": {"kM2S2": .375, "omegaSInverse": 100, "basis": "Explicit prescribed classroom inlet values; not manufacturer or measured turbulence."},
+                  "gravityInSolver": False, "headDatum": "No gravity field in steady singlephase solver; report total-pressure rise and add declared elevation correction independently.",
+                  "wallAdaptation": "Rotating blade/impeller-hub/impeller-shroud; stationary inblock-hub/inblock-shroud/volute walls. Source Python explicitly configures only two wall motions; remaining wall defaults were not verified. This is a declared classroom adaptation."},
+              "sampling": {"nativeFunctionObjectConvention": "Foundation12 select patch; operation average; weightField phi (signed).", "flowUnits": "m3/s outward positive",
+                  "totalPressureField": "totalPressurePa includes rho*pKinematic + rho*|Uabsolute|^2/2 + 101325.",
+                  "staticPressureField": "staticPressurePa from calcTotal=no is rho*pKinematic only; add 101325 exactly once in downstream absolute conversion.",
+                  "reverseFlowFromSumAndSumMag": "outletReverse=(sumMagPhi-sumPhi)/2; inletReverse=(sumMagPhi+sumPhi)/2.",
+                  "iterationIndexIsPhysicalTime": False, "qualifiedBaseline": False},
+              "requiredAcceptance": ["Actual native conversion matches source-pinned generated counts/identities", "checkMesh geometry/topology and coupled interface coverage",
+                  "Conservation, finite fields, residual histories, head/flow stationarity over declared final window", "Wall resolution/yPlus and mesh convergence",
+                  "Independent phase-change sweep with absolute pressure and qualified noncavitating reference", "Physical-time transient, time-step convergence and matched-field restart comparison"],
+              "openFoamConversionVerified": False, "nativeCaseGenerated": False, "actualCfdRunVerified": False, "qualifiedBaseline": False,
+              "simulationExecuted": False, "fluentSessionConnected": False, "licenseVerified": False, "mainApplicationWrites": False,
+              "claimBoundary": "Prepared OpenFOAM dictionaries from actual remeshed components under explicit classroom assumptions; no executed or validated CFD result.",
+              "references": ["https://github.com/OpenFOAM/OpenFOAM-12/tree/master/tutorials/incompressibleFluid/mixerVessel2DMRF",
+                  "https://github.com/OpenFOAM/OpenFOAM-12/blob/master/src/finiteVolume/fields/fvPatchFields/derived/flowRateOutletVelocity/flowRateOutletVelocityFvPatchVectorField.H",
+                  "https://github.com/OpenFOAM/OpenFOAM-12/blob/master/applications/utilities/mesh/manipulation/mergeMeshes/mergeMeshes.C"]}
+    write_exclusive(output / "openfoam-preparation.json", inventory.bounded_json(report))
+    return {"status": report["status"], "reportFile": str(output / "openfoam-preparation.json"), "caseDirectories": [row["caseDirectory"] for row in records],
+            "actualCfdRunVerified": False, "mainApplicationWrites": False}
+
+
+def foam_text(path):
+    text = read_regular(path, MAX_NATIVE_BYTES).decode("ascii")
+    text = re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.S)
+    match = re.search(r"FoamFile\s*\{([^{}]*)\}", text)
+    if not match or not re.search(r"\bformat\s+ascii\s*;", match[1]):
+        raise CaseIssue("Native verification requires actual ASCII FoamFile storage.")
+    expected = {"points": {"vectorField"}, "faces": {"faceList"}, "owner": {"labelList"}, "neighbour": {"labelList"},
+                "boundary": {"polyBoundaryMesh"}, "cellZones": {"regIOobject", "cellZoneMesh"}}
+    native_class = re.search(r"\bclass\s+(\w+)\s*;", match[1])
+    native_object = re.search(r"\bobject\s+([A-Za-z0-9_-]+)\s*;", match[1])
+    name = Path(path).name
+    if name not in expected or not native_class or native_class[1] not in expected[name] or not native_object or native_object[1] != name:
+        raise CaseIssue("Native FoamFile class/object must match its actual polyMesh role.")
+    return text[match.end():].strip()
+
+
+def native_list(path):
+    match = re.fullmatch(r"(\d+)\s*\((.*)\)\s*;?", foam_text(path), re.S)
+    if not match:
+        raise CaseIssue("A counted native list is required: " + Path(path).name)
+    return int(match[1]), match[2].strip()
+
+
+def verify_conversion(case_directory, expected, converter_log):
+    """Read actual native topology; never rewrite a converted mesh or trust exit alone."""
+    case = regular_directory(case_directory)
+    log = read_regular(converter_log, 4*1024**2).decode("utf-8", errors="strict")
+    if not re.search(r"(?m)^End\s*$", log) or re.search(r"FOAM FATAL|Segmentation fault|Floating point exception", log):
+        raise CaseIssue("A completed actual gmshToFoam log without native fatal errors is required.")
+    mesh = case / "constant/polyMesh"
+    np, point_body = native_list(mesh / "points")
+    vectors = re.findall(r"\(([^()]*)\)", point_body)
+    points = [tuple(float(value) for value in row.split()) for row in vectors]
+    if np != expected["nodeCount"] or len(points) != np or any(len(p) != 3 or not all(math.isfinite(v) for v in p) for p in points):
+        raise CaseIssue("Actual converted points differ from the generated component count.")
+    generated_points = expected.get("nodeCoordinatesInFileOrder")
+    if not generated_points or len(generated_points) != np:
+        raise CaseIssue("Use the actual parsed generated MSH coordinates for conversion verification.")
+    maximum_deviation = max(abs(a-b) for native, generated in zip(points, generated_points) for a,b in zip(native,generated))
+    if not math.isfinite(maximum_deviation) or maximum_deviation > COORDINATE_TOLERANCE:
+        raise CaseIssue("Converted point coordinates/order differ from the generated MSH at the required precision.")
+    no, owner_body = native_list(mesh / "owner")
+    nn, neighbour_body = native_list(mesh / "neighbour")
+    owner, neighbour = [int(v) for v in owner_body.split()], [int(v) for v in neighbour_body.split()]
+    if len(owner) != no or len(neighbour) != nn or nn > no or any(v < 0 or v >= expected["cellCount"] for v in owner + neighbour):
+        raise CaseIssue("Actual owner/neighbour lists need valid complete cell references.")
+    if set(owner + neighbour) != set(range(expected["cellCount"])):
+        raise CaseIssue("All generated cells must remain present in native topology.")
+    nf, face_body = native_list(mesh / "faces")
+    face_rows = re.findall(r"(\d+)\s*\(([^()]*)\)", face_body)
+    if nf != no or len(face_rows) != nf:
+        raise CaseIssue("Actual face and owner counts must agree.")
+    for n, vertices in face_rows:
+        ids = [int(v) for v in vertices.split()]
+        if len(ids) != int(n) or len(ids) < 3 or len(set(ids)) != len(ids) or any(v < 0 or v >= np for v in ids):
+            raise CaseIssue("Every converted native face needs distinct valid point references.")
+    nb, boundary_body = native_list(mesh / "boundary")
+    patches = re.findall(r"([A-Za-z0-9_-]+)\s*\{([^{}]*)\}", boundary_body)
+    if len(patches) != nb:
+        raise CaseIssue("Actual boundary patches must match the native list count.")
+    actual, start, empty_placeholder = {}, nn, None
+    for name, body in patches:
+        size = re.search(r"\bnFaces\s+(\d+)\s*;", body)
+        first = re.search(r"\bstartFace\s+(\d+)\s*;", body)
+        if name in actual or not size or not first or int(first[1]) != start:
+            raise CaseIssue("Actual boundary face ranges must be contiguous and unique.")
+        actual[name] = int(size[1])
+        patch_type = re.search(r"\btype\s+(\w+)\s*;", body)
+        expected_type = "wall" if name in ROTATING | STATIONARY else "patch"
+        if not patch_type or patch_type[1] != expected_type:
+            raise CaseIssue("Native wall/interface class must match the declared classroom physical role; apply changeDictionary before verification.")
+        if name == "defaultFaces":
+            if actual[name] != 0 or not re.search(r"\btype\s+patch\s*;", body):
+                raise CaseIssue("Only a zero-face plain defaultFaces placeholder is permitted; no unassigned positive faces.")
+            empty_placeholder = {"name": name, "nFaces": 0, "type": "patch", "startFace": start}
+        start += actual[name]
+    actual_without_placeholder = {name: count for name,count in actual.items() if name != "defaultFaces"}
+    if start != no or actual_without_placeholder != expected["patchFaces"]:
+        raise CaseIssue("Converted native boundary tags/counts differ from the actual source-tagged generated mesh.")
+    nz, zone_body = native_list(mesh / "cellZones")
+    zones = re.findall(r"([A-Za-z0-9_-]+)\s*\{([^{}]*)\}", zone_body)
+    if nz != 1 or len(zones) != 1 or zones[0][0] != expected["cellZone"]:
+        raise CaseIssue("The exact generated fluid cellZone is required.")
+    labels = re.search(r"\bcellLabels\s+(?:List<label>\s+)?(\d+)\s*\(([^()]*)\)\s*;", zones[0][1], re.S)
+    if not labels or int(labels[1]) != expected["cellCount"] or sorted(int(v) for v in labels[2].split()) != list(range(expected["cellCount"])):
+        raise CaseIssue("The actual fluid cellZone must cover every converted cell exactly once.")
+    return {"componentCellZone": expected["cellZone"], "nodeCount": np, "cellCount": expected["cellCount"], "faceCount": nf,
+            "patchFaces": actual_without_placeholder, "emptyDefaultFacesPlaceholder": empty_placeholder, "conversionVerified": True, "nativeGeometryQualityVerified": False, "actualCfdRunVerified": False,
+            "maximumCoordinateDeviationAssumedM": maximum_deviation,
+            "coordinateVerificationToleranceAssumedM": COORDINATE_TOLERANCE,
+            "logSha256": sha256(log.encode("utf-8")).hexdigest(), "claim": "Actual converter completion plus native points/topology/tag/count/cell coverage; coupled coverage and checkMesh remain separate."}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mesh-directory", type=Path, required=True)
+    parser.add_argument("--output-directory", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        print(json.dumps(prepare(args.mesh_directory, args.output_directory), allow_nan=False))
+        return 0
+    except (CaseIssue, inventory.InspectionIssue, OSError, ValueError, KeyError) as error:
+        print(json.dumps({"status": "CASE_PREPARATION_REQUIRED", "reasonCode": "CFD_CLASSROOM_OPENFOAM_PREPARATION_REQUIRED", "action": str(error)[:500],
+                          "actualCfdRunVerified": False, "mainApplicationWrites": False}))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

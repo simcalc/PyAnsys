@@ -14,7 +14,7 @@ jobs:
   volume:
     name: FREE public runner bounded volume mesh trial
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 35
     env:
       PIP_CONFIG_FILE: /dev/null
       PIP_INDEX_URL: https://pypi.org/simple
@@ -53,6 +53,28 @@ jobs:
           set -euo pipefail
           ulimit -v 2097152
           timeout --kill-after=10s 300s "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Convert and inspect the actual candidate before steady MRF
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$(command -v python)"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-pump-${GITHUB_RUN_ID}" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_openfoam.py \
+            --mesh-directory "$RUNNER_TEMP/frozen-rotor-remesh" \
+            --output-directory "$RUNNER_TEMP/frozen-openfoam-case"
       - name: Retain only bounded mesh and diagnostic evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -62,5 +84,9 @@ jobs:
             ${{ runner.temp }}/frozen-rotor-remesh/remesh-report.json
             ${{ runner.temp }}/frozen-rotor-remesh/impeller.msh
             ${{ runner.temp }}/frozen-rotor-remesh/volute.msh
+            ${{ runner.temp }}/frozen-rotor-remesh/remesh-progress.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-preparation.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-execution.json
+            ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
           if-no-files-found: error
           retention-days: 7
