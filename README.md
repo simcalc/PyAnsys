@@ -84,3 +84,17 @@ Run **Actions → Inspect official Frozen Rotor mesh → Run workflow** to read 
 The inspector verifies actual file sizes and SHA-256 before reading topology, surface names and coordinate metadata. It rejects external HDF5 links and preserves the distinction between mesh inventory and native mesh quality. Original tutorial code is treated as data and is never imported or executed.
 
 Compare the **combined impeller plus volute** cell count against the Student edition's current limit. The official [Ansys Student page](https://ansys.synopsys.com/academic/students/ansys-student) lists a fluid limit of one million cells/nodes and a 50 GB disk requirement. That requirement is not a measured installer size, and a model within the cell limit still needs a compatible licensed local solver, RAM budget, mesh/interface checks and numerical acceptance. SDK installation and this inventory do not satisfy those execution gates.
+
+### Actual inspected inventory · 11 October 2026
+
+[Run 38152095914](https://github.com/simcalc/PyAnsys/actions/runs/38152095914) passed all **26 contracts** and inspected both actual checksum-pinned meshes. Its [metadata report](https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-mesh-review-38152095914/mesh-inspection.json) is **92,717 bytes**, SHA-256 `7c33b681d30be88ad2c5396d27e4990d34cf2463e28ab546ce52d01a27ff65e4`. The workflow downloaded the published report anonymously and compared its bytes with the original; the project separately repeated that verification.
+
+| Stored component | Cells | Nodes |
+| --- | ---: | ---: |
+| Impeller | 773,352 | 837,936 |
+| Volute | 368,411 | 122,551 |
+| Sum before native append | **1,141,763** | **960,487** |
+
+The contiguous stored zone ranges confirm these component counts. The original combined cell inventory **exceeds the Student cell limit by 141,763 cells**. The lower node count does not cancel the cell-limit violation. This inspection did not execute native append, verify geometric nonoverlap or create a joined case. The source's two cell zones and all 11 named boundary/interface surfaces are present in the stored metadata.
+
+For the FREE Student path, derive and check a separate lighter learning mesh while preserving the official originals. Reducing the reported number or calling one component the full impeller–volute model would not satisfy the requirement. Coordinate units, mesh quality, interface consistency, RAM use, solver/license compatibility and numerical convergence remain unverified. This completed metadata run supplies no physical CFD, cavitation, NPSHr or transient result.
