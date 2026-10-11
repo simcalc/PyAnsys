@@ -150,6 +150,40 @@ def geometry_identity(remesh):
             "mainApplicationWrites": False}
 
 
+def constant_outlet_flow(text):
+    """Read the exact native constant Function1; never execute a dictionary.
+
+    Foundation12 Function1::writeEntry serializes an authored scalar constant
+    as {type constant; value N;}. These three scalar forms describe the same
+    SI volumetric flow, while their original bytes still bind the manifest.
+    """
+    includes = re.findall(r"#[^\n]*", text)
+    require(len(includes) <= 1 and all(row.strip() == '#includeEtc "caseDicts/setConstraintTypes"' for row in includes),
+            "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+    text = re.sub(r"#[^\n]*", "", text)
+    require(not re.search(r"\b(?:codeStream|codeInclude|codeExecute|codedFixedValue|coded|table)\b", text),
+            "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+    require(len(re.findall(r"\bdimensions\b", text)) == 1
+            and re.search(r"\bdimensions\s*\[\s*0\s+1\s+-1\s+0\s+0\s+0\s+0\s*\]\s*;", text)
+            and len(re.findall(r"\bvolumetricFlowRate\b", text)) == 1,
+            "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+    def constant(match):
+        scalar = re.fullmatch(r"\s*type\s+constant\s*;\s*value\s+(" + FLOAT + r")\s*;\s*", match[1])
+        require(scalar is not None and math.isfinite(float(scalar[1])), "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+        return "volumetricFlowRate " + scalar[1] + ";"
+    text = re.sub(r"\bvolumetricFlowRate\s*\{([^{}]*)\}", constant, text)
+    patches = re.findall(r'"?mass-flow-inlet-11"?\s*\{([^{}]*)\}', text)
+    require(len(patches) == 1 and len(re.findall(r'"?mass-flow-inlet-11"?\s*\{', text)) == 1,
+            "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+    body = patches[0]
+    flow = re.search(r"\bvolumetricFlowRate\s+(?:constant\s+)?(" + FLOAT + r")\s*;", body)
+    require(len(re.findall(r"\btype\b", body)) == 1
+            and re.search(r"\btype\s+flowRateOutletVelocity\s*;", body) and flow is not None
+            and math.isfinite(float(flow[1])) and math.isclose(float(flow[1]), 90/998.2, rel_tol=1e-12),
+            "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+    return float(flow[1])
+
+
 def build_manifest(execution_directory):
     """Return {study, manifest}; caller persists it before foamRun. No file writes."""
     root = case_tool.regular_directory(execution_directory)
@@ -195,10 +229,7 @@ def build_manifest(execution_directory):
                     require(body and re.search(r"type\s+totalPressure\s*;", body[1]) and
                             re.search(r"p0\s+uniform\s+0(?:\.0*)?\s*;", body[1]), "CFD_NATIVE_ABSOLUTE_PRESSURE_BC_REQUIRED")
                 else:
-                    body = re.search(r'"?mass-flow-inlet-11"?\s*\{([^{}]*)\}', text)
-                    flow = re.search(r"volumetricFlowRate\s+(?:constant\s+)?(" + FLOAT + r")\s*;", body[1] if body else "")
-                    require(body and re.search(r"type\s+flowRateOutletVelocity\s*;", body[1]) and flow and
-                            math.isclose(float(flow[1]), 90/998.2, rel_tol=1e-12), "CFD_NATIVE_FIXED_FLOW_BC_REQUIRED")
+                    constant_outlet_flow(text)
             rows.append(row)
             files.append({**row, "control": key})
         controls[key] = sha256(encoded(rows)).hexdigest()

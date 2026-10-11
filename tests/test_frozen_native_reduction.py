@@ -16,6 +16,63 @@ spec.loader.exec_module(native)
 
 
 class NativeReductionContracts(unittest.TestCase):
+    def test_exact_constant_function1_native_forms_preserve_flow_units_and_actual_manifest_bytes(self):
+        original=native.case_tool.case_files("impeller")["0/U"]
+        value=format(90/998.2,".17g")
+        primitive="volumetricFlowRate "+value+";"
+        forms=(primitive,"volumetricFlowRate constant "+value+";",
+               "volumetricFlowRate\n{\n    type constant;\n    value "+value+";\n}")
+        for form in forms:
+            with self.subTest(form=form),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);initial=self.fixture(root)
+                actual=original.replace(primitive,form)
+                self.assertAlmostEqual(native.constant_outlet_flow(actual),90/998.2,places=15)
+                row=self.write(root,"impeller-case/0/U",actual)
+                with patch.object(native,"binary_identity"):
+                    current=native.build_manifest(root)
+                bound=next(record for record in current["manifest"]["files"] if record["path"]==row["path"])
+                self.assertEqual({key:bound[key] for key in row},row)
+                self.assertEqual((root/row["path"]).read_bytes(),actual.encode("utf-8"))
+                self.assertEqual(current["study"]["input"],initial["study"]["input"])
+                self.assertEqual(current["study"]["controls"]["geometrySha256"],initial["study"]["controls"]["geometrySha256"])
+                if form!=primitive:
+                    self.assertNotEqual(current["study"]["controls"]["boundarySha256"],initial["study"]["controls"]["boundarySha256"])
+
+    def test_nonconstant_duplicate_directive_nonfinite_or_changed_native_flow_is_rejected(self):
+        original=native.case_tool.case_files("impeller")["0/U"]
+        value=format(90/998.2,".17g")
+        primitive="volumetricFlowRate "+value+";"
+        bad=("volumetricFlowRate table ((0 "+value+"));",
+             "volumetricFlowRate {type coded; value "+value+";}",
+             "volumetricFlowRate {type constant; type constant; value "+value+";}",
+             "volumetricFlowRate {type constant; value "+value+"; value "+value+";}",
+             "volumetricFlowRate {type constant; value "+value+"; extra 1;}",
+             "volumetricFlowRate {type constant; value "+value+"; #include unsafe\n}",
+             "volumetricFlowRate {type constant; value {codeStream {}};}",
+             "volumetricFlowRate {type constant; value 1e999;}",
+             "volumetricFlowRate {type constant; value nan;}",
+             "volumetricFlowRate {type constant; value -1;}",
+             "volumetricFlowRate {type constant; value 1;}",
+             "volumetricFlowRate constant "+value+" extra;",
+             primitive+" "+primitive)
+        for form in bad:
+            changed=original.replace(primitive,form)
+            with self.subTest(form=form),self.assertRaisesRegex(native.protocol.ProtocolError,"FIXED_FLOW_BC_REQUIRED"):
+                native.constant_outlet_flow(changed)
+        for changed in (original.replace("dimensions [0 1 -1 0 0 0 0]","dimensions [0 3 -1 0 0 0 0]"),
+                        original.replace("dimensions [0 1 -1 0 0 0 0];","dimensions [0 1 -1 0 0 0 0]; dimensions [0 3 -1 0 0 0 0];"),
+                        original.replace("type flowRateOutletVelocity;","type flowRateOutletVelocity; type zeroGradient;"),
+                        original+"\nmass-flow-inlet-11 {type flowRateOutletVelocity;}\n",
+                        original.replace('type flowRateOutletVelocity;','type codedFixedValue;'),
+                        original.replace('#includeEtc "caseDicts/setConstraintTypes"','#include "external-secret"')):
+            with self.subTest(changed=changed[-200:]),self.assertRaisesRegex(native.protocol.ProtocolError,"FIXED_FLOW_BC_REQUIRED"):
+                native.constant_outlet_flow(changed)
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);self.fixture(root)
+            self.write(root,"impeller-case/0/U",original.replace(primitive,bad[4]))
+            with patch.object(native,"binary_identity"),self.assertRaisesRegex(native.protocol.ProtocolError,"FIXED_FLOW_BC_REQUIRED"):
+                native.build_manifest(root)
+
     def write(self, root, relative, value):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)

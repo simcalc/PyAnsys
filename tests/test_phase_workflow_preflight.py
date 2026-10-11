@@ -40,6 +40,24 @@ class AdmissionContracts(unittest.TestCase):
         self.assertEqual(result['artifactName'],'frozen-rotor-original-123456789')
         self.assertFalse(result['sourceBaselineQualified'])
 
+    def test_exact_extended_free_hxt_lane_requires_its_own_completed_bound_artifact(self):
+        run,artifacts=self.fixture()
+        run['path']='.github/workflows/remesh-extended-free-frozen-rotor.yml'
+        with self.assertRaises(ValueError):tool.validate_source(self.inputs(),run,artifacts)
+        artifacts['artifacts'][0]['name']='frozen-rotor-extended-free-hxt-123456789'
+        accepted=tool.validate_source(self.inputs(),run,artifacts)
+        self.assertEqual(accepted['artifactName'],'frozen-rotor-extended-free-hxt-123456789')
+        self.assertEqual(accepted['sourceWorkflow'],run['path'])
+        self.assertFalse(accepted['sourceBaselineQualified']);self.assertFalse(accepted['actualCfdRunVerified'])
+        for key,value in (('status','in_progress'),('conclusion','failure'),('event','pull_request'),
+                          ('path','.github/workflows/remesh-extended-free-frozen-rotor-copy.yml'),('head_sha','b'*39)):
+            altered={**run,key:value}
+            with self.subTest(key=key),self.assertRaises(ValueError):tool.validate_source(self.inputs(),altered,artifacts)
+        for name in ('frozen-rotor-extended-free-hxt-123456788','frozen-rotor-remesh-123456789',
+                     'frozen-rotor-extended-free-hxt-123456789-extra'):
+            wrong={'artifacts':[{**artifacts['artifacts'][0],'name':name}]}
+            with self.subTest(name=name),self.assertRaises(ValueError):tool.validate_source(self.inputs(),run,wrong)
+
     def test_untrusted_input_values_and_physical_time_bounds_rejected(self):
         for field, value in [('BASELINE_RUN_ID', '../Main'), ('BASELINE_RUN_ID', '0'),
                              ('PHASE_MODE', 'run arbitrary'), ('PRESSURE_ABSOLUTE_PA', 'nan'),
