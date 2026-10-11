@@ -1,0 +1,104 @@
+name: Frozen Rotor tagged surface native preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-surface-preflight
+  cancel-in-progress: false
+
+jobs:
+  surface:
+    name: FREE source-bound surfaceCheck - no volume or CFD claim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE standard runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated immutable source reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/surface-reader"
+          "$RUNNER_TEMP/surface-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/surface-reader/bin/python" -m pip check
+      - name: Verify surface, provenance and equation contracts
+        run: '"$RUNNER_TEMP/surface-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Extract all eleven immutable tagged source boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-source-surfaces-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 300s \
+            "$RUNNER_TEMP/surface-reader/bin/python" -B tools/extract_frozen_rotor_boundaries.py \
+            --output-dir "$RUNNER_TEMP/frozen-boundary-surfaces"
+      - name: Preserve every stored triangle and patch tag in two component unions
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-surface-union-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 300s \
+            "$RUNNER_TEMP/surface-reader/bin/python" -B tools/frozen_rotor_surface_union.py \
+            --surface-directory "$RUNNER_TEMP/frozen-boundary-surfaces" \
+            --output-directory "$RUNNER_TEMP/frozen-surface-unions"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Actually check closure, orientation and self-intersection
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$RUNNER_TEMP/surface-reader/bin/python"
+          test -x "$python_path"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-surface-native-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 330s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_surface_check.py \
+            --surface-directory "$RUNNER_TEMP/frozen-surface-unions" \
+            --output-directory "$RUNNER_TEMP/frozen-surface-native"
+      - name: Retain actual tagged surfaces, source bindings and native logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-surface-preflight-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frozen-boundary-surfaces/topology-report.json
+            ${{ runner.temp }}/frozen-surface-unions/**
+            ${{ runner.temp }}/frozen-surface-native/*.json
+            ${{ runner.temp }}/frozen-surface-native/logs/*.log
+          if-no-files-found: error
+          retention-days: 1

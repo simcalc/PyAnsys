@@ -59,6 +59,17 @@ jobs:
           records = [source.verify_file(source.download_mesh(target, name), name) for name in source.MESH_NAMES]
           print(json.dumps({'sourceFiles': records, 'simulationExecuted': False, 'mainApplicationWrites': False}))
           PY
+      - name: Independently measure every source determinant and failed source ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-original-source-quality-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 300s \
+            "$RUNNER_TEMP/original-reader/bin/python" -B tools/localize_frozen_rotor_quality.py \
+            --mesh-directory "$RUNNER_TEMP/frozen-original-sources" \
+            --output-report "$RUNNER_TEMP/source-quality-localization.json"
       - name: Preserve every original polygon, cell and float64 coordinate
         shell: bash
         run: |
@@ -96,6 +107,24 @@ jobs:
             --pressure-reference-absolute-pa 300000
       - name: Independently admit numerical baseline evidence
         run: python -B tools/frozen_rotor_native_reduction.py --execution-directory "$RUNNER_TEMP/frozen-openfoam-case"
+      - name: Independently bind actual failed native cells to exact source IDs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUNNER_TEMP/frozen-openfoam-case/impeller-case/constant/polyMesh/sets/underdeterminedCells" ]; then
+            echo '{"sourceNativeFailedCellEquivalenceChecked":false,"reason":"No actual native underdeterminedCells set was produced; no correspondence is inferred."}'
+            exit 0
+          fi
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-original-quality-equivalence-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 600s \
+            "$RUNNER_TEMP/original-reader/bin/python" -B tools/verify_frozen_rotor_quality_equivalence.py \
+            --execution-directory "$RUNNER_TEMP/frozen-openfoam-case" \
+            --converted-mesh-directory "$RUNNER_TEMP/frozen-native-original" \
+            --source-localization-report "$RUNNER_TEMP/source-quality-localization.json" \
+            --output-report "$RUNNER_TEMP/original-quality-equivalence.json"
       - name: Package only the actual accepted native data
         shell: bash
         run: |
@@ -109,10 +138,20 @@ jobs:
           name: frozen-rotor-original-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/frozen-native-original/native-conversion.json
+            ${{ runner.temp }}/source-quality-localization.json
+            ${{ runner.temp }}/original-quality-equivalence.json
             ${{ runner.temp }}/frozen-openfoam-case/*.json
             ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.zip
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
             ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/sets/underdeterminedCells
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/points
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/faces
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/owner
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/neighbour
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/boundary
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/cellZones
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/sourceFaceIds
+            ${{ runner.temp }}/frozen-openfoam-case/volute-case/sourceFaceIds
             ${{ runner.temp }}/frozen-openfoam-case/impeller-case/postProcessing/**
           if-no-files-found: error
           retention-days: 1

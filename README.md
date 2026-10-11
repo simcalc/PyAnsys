@@ -408,3 +408,48 @@ cell/face maps are immutable, and every remaining source failure is counted.
 Zero admissible pairs produces a diagnostic with no derived volume. A produced
 prototype proceeds through actual merge, NCC and unchanged full `checkMesh`;
 the diagnostic runner never invokes `foamRun` or qualifies a baseline.
+
+Actual targeted run [38171167520](https://github.com/simcalc/PyAnsys/actions/runs/38171167520)
+passed **443 contract tests**, recomputed all 11,310 source failures and scanned
+**10,000 neighbour candidates** across 1,948 targets in 43 seconds. It selected
+**zero** pairs. The conservative union policy rejected 8,884 candidates for
+nonplanar retained polygons and 1,116 for insufficient determinant improvement.
+The scan reached its declared cap; it does not prove that no eligible pair
+exists anywhere in the complete source. No derived mesh or native solver
+execution was published, and both source hashes remained unchanged. Failure
+of this conservative prototype is not a claim that nonplanar source polygons
+are intrinsically invalid in OpenFOAM; the original native check separately
+accepted those face geometries and rejected the determinant criterion.
+
+Actual Delaunay run [38170639216](https://github.com/simcalc/PyAnsys/actions/runs/38170639216)
+passed 416 contract tests and entered boundary recovery and tetra refinement.
+It reached its **900-second** deadline in the impeller without publishing a
+complete volume. Its explicit result is `CFD_CLASSROOM_MESH_WORKER_TIMEOUT`,
+with zero accepted cells. Source hashes remained unchanged. The trial did not
+install a solver case, run OpenFOAM, or qualify baseline performance.
+
+### Independent original-cell correspondence and tagged-surface preflight
+
+The original-volume workflow now independently measures all source determinant
+failures, retains the actual native failed-cell set and compares all current
+oriented polygons, coordinates and owner/neighbour cell bindings. Only exact
+source/native correspondence can pass this diagnostic. It cannot change the
+0.001 determinant threshold, admit a failed mesh or produce a CFD result.
+
+The manual `Frozen Rotor tagged surface native preflight` workflow prepares
+two whole component surfaces from all **11 pinned STL boundaries** and checks
+them with the actual Foundation-12 `surfaceCheck -checkSelfIntersection`.
+Every stored triangle, float32 coordinate, winding and original patch tag is
+retained in deterministic OBJ files. Exact indexing is declared; it is not
+proof of original HDF5 node identity or float64 polygon equivalence. Both
+surface files can be regenerated independently from retained immutable STLs.
+
+This surface trial is bounded to one CPU, 4 GiB memory and 300 seconds native
+execution. Actual native closure, edge incidence, orientation, triangle
+quality and self-intersection diagnostics are required; an exit code of zero
+alone is insufficient. Multiple consistently oriented closed boundary shells
+are allowed, while fluid-volume connectivity and vertex manifold status remain
+unverified. Surface acceptance is separate from volume mesh acceptance,
+baseline, cavitation/NPSHr and transient qualification. Any later snappyHexMesh
+lane must explicitly report geometry approximation and satisfy all unchanged
+native volume, interface and numerical checks before CFD results are admitted.
