@@ -269,6 +269,7 @@ class RemeshContracts(unittest.TestCase):
         unoptimised=remesh.volume_mesh_options(1/32,"unoptimised")
         self.assertEqual(full["Mesh.Optimize"],1)
         self.assertEqual(full["Mesh.Renumber"],0)
+        self.assertEqual(full["Mesh.PreserveNumberingMsh2"],1)
         self.assertEqual(unoptimised["Mesh.Optimize"],0)
         self.assertEqual({key:value for key,value in full.items() if key!="Mesh.Optimize"},
                          {key:value for key,value in unoptimised.items() if key!="Mesh.Optimize"})
@@ -336,6 +337,7 @@ class RemeshContracts(unittest.TestCase):
         class Mesh:
             generated=False
             optimised=False
+            cache_rebuilt=False
             calls=[]
             def addNodes(self,*args): pass
             def addElementsByType(self,*args): pass
@@ -352,6 +354,9 @@ class RemeshContracts(unittest.TestCase):
             def optimize(self,*args,**kwargs):
                 self.calls.append((args,kwargs))
                 self.optimised=True
+            def rebuildElementCache(self,*,onlyIfNecessary):
+                self.asserted_forced_rebuild = onlyIfNecessary is False
+                self.cache_rebuilt = self.asserted_forced_rebuild
             def getElements(self,dimension,entity):
                 if dimension==3:
                     if not self.optimised:
@@ -366,6 +371,8 @@ class RemeshContracts(unittest.TestCase):
                     faces=list(FACES[2:] if entity==11 else FACES[:2])
                 return [2],[list(range(1,len(faces)+1))],[[node for face in faces for node in face]]
             def getElementQualities(self,tags,quantity):
+                if self.optimised and not self.cache_rebuilt:
+                    raise RuntimeError('Unknown element after native edge swap')
                 value=-1e-15 if quantity=="minSICN" and (not self.optimised or invalid_final_quality) else .5
                 return [value]*len(tags)
         mesh=Mesh();mesh.calls=[]
@@ -391,6 +398,8 @@ class RemeshContracts(unittest.TestCase):
         self.assertEqual(evidence["after"]["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],0)
         self.assertTrue(evidence["completeNativeBoundaryBeforeVerified"])
         self.assertTrue(evidence["completeNativeBoundaryAfterVerified"])
+        self.assertTrue(evidence["elementCacheRebuiltAfterOptimisation"])
+        self.assertTrue(gmsh.model.mesh.asserted_forced_rebuild)
         self.assertTrue(evidence["qualityAccepted"])
         self.assertFalse(evidence["iterationBoundClaimed"])
         self.assertFalse(result["optimisation"]["optimisationSuccessVerified"])

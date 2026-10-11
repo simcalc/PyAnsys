@@ -78,6 +78,7 @@ def volume_mesh_options(size, mode="full"):
             # Native global node IDs are part of the exact boundary contract.
             # The default renumbers both nodes and elements after generate(3).
             "Mesh.Renumber": 0,
+            "Mesh.PreserveNumberingMsh2": 1,
             "Mesh.Optimize": optimisation["meshOptimize"]}
 
 
@@ -533,11 +534,16 @@ def remesh_component(model, name, destination, gmsh, np, progress):
                     "before": progress["generatedVolumeDiagnostics"], "after": None,
                     "completeNativeBoundaryBeforeVerified": True, "completeNativeBoundaryAfterVerified": False,
                     "boundaryBeforeAudit": before_audit, "nativeOptimisationReturned": False,
+                    "elementCacheRebuiltAfterOptimisation": False,
                     "qualityAccepted": False, "claimBoundary": "Native interior optimisation under the unchanged external watchdog; full source boundary equality and every-cell quality remain mandatory."}
         progress["interiorOptimisationDiagnostics"] = evidence
         checkpoint(progress, "native-default-interior-optimisation")
         gmsh.model.mesh.optimize("", force=True)  # Native default ignores niter; the external watchdog owns the bound.
         evidence["nativeOptimisationReturned"] = True
+        # Quality reads before optimisation populate Gmsh's element lookup.
+        # Native edge swaps delete/add tetrahedra; rebuild before any fresh read.
+        gmsh.model.mesh.rebuildElementCache(onlyIfNecessary=False)
+        evidence["elementCacheRebuiltAfterOptimisation"] = True
         del points, tags, cells  # Retain bounded summaries, not both pre/post cell arrays.
         points, tags, cells = inspect_exported_volume(gmsh, volume, name, progress)
         evidence["after"] = progress["generatedVolumeDiagnostics"]
