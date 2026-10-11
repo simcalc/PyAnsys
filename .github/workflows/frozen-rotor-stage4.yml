@@ -1,0 +1,113 @@
+name: Frozen Rotor fixed-time and native restart pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: Completed qualified native MRF evidence run in this public repository
+        required: true
+        type: string
+      pressure_absolute_pa:
+        description: Explicit inlet absolute total pressure in Pa for the matched fixed-time family
+        required: true
+        type: string
+        default: '300000'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: frozen-rotor-stage4-pilot
+  cancel-in-progress: false
+
+jobs:
+  verification:
+    name: FREE public fixed-clock native campaign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+      PRESSURE_ABSOLUTE_PA: ${{ inputs.pressure_absolute_pa }}
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE runner and fixed pilot inputs
+        run: |
+          python3 -B tools/public_runner_guard.py
+          python3 -B tools/stage4_workflow_preflight.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Verify checkpoint and fixed-clock campaign contracts
+        run: python -B -m unittest discover -s tests -p '*stage4*' -v
+      - name: Inspect and download only the admitted native baseline artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID/artifacts" > "$RUNNER_TEMP/source-artifacts.json"
+          python -B tools/stage4_workflow_preflight.py --run-json "$RUNNER_TEMP/source-run.json" --artifacts-json "$RUNNER_TEMP/source-artifacts.json"
+          gh run download "$BASELINE_RUN_ID" --repo simcalc/PyAnsys --name "frozen-rotor-remesh-$BASELINE_RUN_ID" --dir "$RUNNER_TEMP/source-artifact"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Verify transferred native bytes and baseline qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B tools/unpack_native_pump_package.py \
+            --archive "$RUNNER_TEMP/source-artifact/frozen-openfoam-case/native-case-evidence.zip" \
+            --manifest "$RUNNER_TEMP/source-artifact/frozen-openfoam-case/native-case-evidence.json" \
+            --output-directory "$RUNNER_TEMP/frozen-baseline"
+      - name: Execute the bounded fixed-clock family and actual native restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$(command -v python)"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-stage4-${GITHUB_RUN_ID}" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 1230s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_stage4_campaign.py \
+            --baseline-case-directory "$RUNNER_TEMP/frozen-baseline" \
+            --baseline-evidence-json "$RUNNER_TEMP/frozen-baseline/native-baseline-reduction.json" \
+            --output-directory "$RUNNER_TEMP/frozen-stage4-campaign" \
+            --pressure-absolute-pa "$PRESSURE_ABSOLUTE_PA"
+      - name: Independently reduce actual clocks and full-field restart agreement
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B tools/reduce_stage4_campaign.py \
+            --campaign-directory "$RUNNER_TEMP/frozen-stage4-campaign" \
+            --restart-pressure-tolerance-pa 1 \
+            --restart-velocity-tolerance-ms 0.001 \
+            --restart-vapor-tolerance 0.00001 \
+            --restart-point-tolerance-m 0.0000000001
+      - name: Retain actual campaign reports and bounded native evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-stage4-${{ github.run_id }}
+          path: ${{ runner.temp }}/frozen-stage4-campaign/**
+          if-no-files-found: error
+          retention-days: 1

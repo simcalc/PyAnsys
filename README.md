@@ -237,3 +237,60 @@ sets `Mesh.Renumber=0` to retain original global node IDs. Exact coordinate,
 triangle, winding, source-zone and every-cell quality checks remain mandatory.
 This setting is an attempted correction, not proof that the next mesh passes.
 
+### Measured interior optimisation and coordinate export
+
+Run [38164614202](https://github.com/simcalc/PyAnsys/actions/runs/38164614202)
+preserved every original boundary ID, coordinate, triangle, winding and zone
+before and after interior optimisation. The actual impeller count decreased
+from 489,452 to 385,728 tetrahedra. Reading post-swap quality then encountered
+an obsolete element lookup cache. The correction forces a rebuild before any
+post-optimisation quality reads; no quality gate was removed.
+
+Run [38165747834](https://github.com/simcalc/PyAnsys/actions/runs/38165747834)
+completed the two-component volume candidate in 113.411 seconds:
+395,233 impeller plus 63,599 volute tetrahedra, **458,832 total**. Original
+source hashes and exact in-memory boundary identity remained unchanged.
+OpenFOAM Foundation 12 was installed, but its pre-conversion input inspection
+rejected two negative tetrahedron volumes in the serialized impeller file.
+This candidate is **not accepted for CFD** and no MRF solver ran.
+
+The pinned [Gmsh MSH2 writer](https://github.com/live-clones/gmsh/blob/gmsh_4_15_2/src/geo/MVertex.cpp#L132)
+stores ASCII coordinates with 16 significant digits. Two extremely thin cells
+had positive native determinants before that rounding and negative determinants
+in the exported file. The next attempt writes the actual measured float64
+coordinates with 17 significant digits, verifies exact numeric round trips,
+retains all original IDs/topology/physical tags, and independently checks every
+serialized element before admitting the candidate. This is coordinate storage
+correction, not point movement, mesh healing or a negative-volume tolerance.
+OpenFOAM quality, interface and baseline checks remain separate requirements.
+
+### Fixed-clock physical transient and actual native restart pilot
+
+The separate manual `Frozen Rotor fixed-time and native restart pilot` workflow
+requires an actual qualified native MRF artifact from this repository. It authors
+three matched sliding cavitation cases at **360, 720 and 1440 steps/revolution**,
+with `adjustTimeStep=no`. At 1450 rpm the shared endpoint is 5.5 revolutions;
+the checkpoint is 2.75 revolutions and the head comparison window spans the
+final three revolutions. These are declared settings, not measured CFD results.
+
+The native runner retains all actual physical time records, finite fields,
+sampling logs, rotor motion and immutable input hashes. A restart case copies
+complete measured native primary/flux/geometry/time state and original reference
+points. It then actually resumes the solver for 2.75 revolutions. Checkpoint
+inventory or copying alone cannot verify restart equivalence.
+
+The independent Python reducer compares every native cell value of absolute
+pressure, absolute velocity and liquid/vapor fraction, plus every endpoint
+point coordinate, in the same immutable native ordering. The pilot explicitly
+declares absolute restart tolerances of **1 Pa**, **0.001 m/s**, **0.00001 phase
+fraction**, and **1e-10 m under the classroom coordinate assumption**.
+It separately derives head time-step GCI from three actual matched runs.
+Spatial mesh convergence, NPSH3 convergence, wall resolution and experimental
+validation are independent conclusions; this pilot cannot establish them.
+
+The pilot uses the standard FREE public runner with deliberate bounds of one
+CPU, 2 GiB aggregate memory, 1200 seconds native execution, 1 GiB campaign
+storage and 32 MiB per native branch log. These are trial resource budgets,
+not GitHub or OpenFOAM licence requirements. Actual failures and incomplete
+evidence remain visible in retained reports. No native Stage4 campaign has yet
+been dispatched because the prerequisite full-pump mesh/MRF is not qualified.
