@@ -722,3 +722,43 @@ Phase admission still requires this new successful baseline run and its own
 bound evidence, followed by an actual qualified active-phase reference.
 Preparing or testing this route does not establish accepted mesh, CFD, NPSHr,
 transient, restart or convergence results. Main files and ports are unchanged.
+
+The completed extended HXT run
+[38181682156](https://github.com/simcalc/PyAnsys/actions/runs/38181682156)
+generated **426,150 tetrahedra**. Its independent replay and fresh native
+conversion in [38183965690](https://github.com/simcalc/PyAnsys/actions/runs/38183965690)
+preserved source coordinates with zero deviation and all eleven boundary roles.
+The actual native mesh failed eight checks, including one negative-volume cell
+and 94,696 cells below the determinant criterion. NCC minimum coverage was
+0.682/0.685, below the unchanged 0.99 threshold. No flow solver ran. A successful
+volume generation or converter exit does not establish accepted CFD geometry.
+
+### Separate authored classroom pump CAD
+
+The manual `Authored classroom pump CAD and native geometry verification`
+workflow creates a **new teaching geometry**, declared in SI metres. It does
+not modify, repair or relabel the original Ansys source meshes. Its provenance
+is `CLASSROOM_AUTHORED_GEOMETRY`; it is not manufacturer-published geometry.
+Dimensions and construction assumptions belong to this distinct source.
+
+One CAD model and volume mesh supply the rotor and stator regions. Both
+interface exports must use the exact same coordinate facets with opposite
+outward owner winding. Admission independently checks every tetrahedral face,
+actual patch roles, SI parameters, source code and artifact hashes. Geometry
+preparation does not inherit a previous mesh or physical result.
+
+The first trial is geometry-only: both component conversions, wall types,
+full native quality checks, merge and NCC coverage. It contains no flow fields
+and never invokes `foamRun`. Failed native sets, meshes and logs are retained.
+The existing quality and coverage criteria remain in force.
+
+CAD generation is limited to one CPU, 4 GiB, 900 seconds and a 512 MiB workspace;
+native geometry checks use one CPU, 2 GiB and 600 seconds. Combined generated
+cells are capped at 500,000. The public standard GitHub runner has no paid or
+self-hosted fallback. Artifacts expire after one day.
+
+Only actual accepted native geometry can proceed to a separate steady MRF
+study. Cavitation, NPSHr, transient, restart, mesh/time convergence and physical
+validation require their own actual runs and evidence. This authored teaching
+lane cannot validate the original pump geometry or manufacturer performance.
+Main source, engineering locks, database, deployment and local ports are unchanged.
