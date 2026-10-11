@@ -20,16 +20,25 @@ import run_frozen_rotor_original as native
 BASE = recipe.base
 SCHEMA = "untirta.frozen-rotor-native-geometry-pilot.v1"
 MAX_SECONDS = 600
+GEOMETRY_KINDS = ("protected-union", "determinant-repair")
 
 
 def require(condition, message):
     recipe.require(condition, message)
 
 
-def prepare(geometry_directory, output_directory):
+def bind_geometry(geometry_directory, geometry_kind):
+    require(geometry_kind in GEOMETRY_KINDS, "Choose an explicit supported geometry derivation; no guessed report or fallback.")
+    if geometry_kind == "protected-union":
+        return geometry.verify_output(geometry_directory)
+    import repair_frozen_rotor_determinant as repair
+    return repair.verify_output(geometry_directory)
+
+
+def prepare(geometry_directory, output_directory, geometry_kind="protected-union"):
     """Author only fixed recipes from the independently verified prototype."""
     source = BASE.regular_directory(geometry_directory)
-    bound = geometry.verify_output(source)
+    bound = bind_geometry(source, geometry_kind)
     target = Path(output_directory).absolute()
     BASE.inventory.output_path(target / "geometry-pilot-preparation.json")
     require(not target.exists() and not target.is_symlink(), "Use a fresh isolated geometry diagnostic directory.")
@@ -48,27 +57,37 @@ def prepare(geometry_directory, output_directory):
             records.append({"path":relative,"bytes":len(raw),"sha256":sha256(raw).hexdigest()})
         components[name] = {"component":name,"caseDirectory":folder,"cellCount":row["cellCount"],"nodeCount":row["nodeCount"],
             "faceCount":row["faceCount"],"patchFaces":{p["name"]:p["nFaces"] for p in row["patches"]},"cellZone":row["cellZone"]["name"]}
-    raw, geometry_record = recipe.descriptor(source,"agglomeration-report.json",limit=BASE.inventory.MAX_REPORT_BYTES)
-    BASE.write_exclusive(target/"agglomeration-report.json",raw)
+    report_name = "agglomeration-report.json" if geometry_kind == "protected-union" else "determinant-repair-report.json"
+    raw, geometry_record = recipe.descriptor(source,report_name,limit=BASE.inventory.MAX_REPORT_BYTES)
+    require(geometry_record == bound["reportFile"], "The exact selected derivation report changed before transfer.")
+    BASE.write_exclusive(target/report_name,raw)
+    if geometry_kind == "determinant-repair":
+        for name, key, limit in (("derivation-policy.json","derivationPolicyFile",BASE.inventory.MAX_REPORT_BYTES),
+                                 ("source-quality-localization.json","sourceQualityDiagnosticFile",32*1024**2)):
+            raw, actual = recipe.descriptor(source,name,limit=limit)
+            require(actual == bound["report"][key], "The selected policy or measured source targets changed before transfer.")
+            BASE.write_exclusive(target/name,raw); records.append(actual)
     commands = recipe.commands(target)[:3]
     require([c[0] for c in commands] == ["mergeMeshes","createNonConformalCouples","checkMesh"], "No solver command belongs to a geometry diagnostic.")
-    report = {"schemaVersion":SCHEMA,"status":"GEOMETRY_PILOT_NATIVE_DIAGNOSTIC_REQUIRED","agglomerationReport":geometry_record,
+    report = {"schemaVersion":SCHEMA,"status":"GEOMETRY_PILOT_NATIVE_DIAGNOSTIC_REQUIRED",
+        "geometryKind":geometry_kind,"derivedGeometryReport":geometry_record,
         "components":components,"authoredAndCopiedFiles":records,"nativeCommandArguments":commands,
         "classroomMetresPerSourceCoordinateUnit":1,"nativeCoordinateUnitsVerified":False,
         "meshQualityCheckedBySolver":False,"nativeQualityAccepted":False,"simulationExecuted":False,"actualCfdRunVerified":False,
         "qualifiedBaseline":False,"npsh3Qualified":False,"physicalTransientExecuted":False,"mainApplicationWrites":False}
     BASE.write_exclusive(target/"geometry-pilot-preparation.json",BASE.inventory.bounded_json(report))
-    require(geometry.verify_output(source) == bound, "Actual derived inputs changed while authoring the geometry diagnostic.")
+    require(bind_geometry(source,geometry_kind) == bound, "Actual derived inputs changed while authoring the geometry diagnostic.")
     native.workspace_size(target)
     return report
 
 
-def run(geometry_directory, output_directory):
+def run(geometry_directory, output_directory, geometry_kind="protected-union"):
+    require(geometry_kind in GEOMETRY_KINDS, "Choose an explicit supported geometry derivation before native execution.")
     native.context_guard()
     start = time.monotonic(); deadline = start+MAX_SECONDS
-    prepared = prepare(geometry_directory,output_directory)
+    prepared = prepare(geometry_directory,output_directory,geometry_kind)
     output = BASE.regular_directory(output_directory); (output/"logs").mkdir()
-    report = {"schemaVersion":SCHEMA,"status":"GEOMETRY_PILOT_NATIVE_DIAGNOSTIC_REQUIRED",
+    report = {"schemaVersion":SCHEMA,"status":"GEOMETRY_PILOT_NATIVE_DIAGNOSTIC_REQUIRED","geometryKind":geometry_kind,
         "githubRunId":os.environ.get("GITHUB_RUN_ID"),"githubSourceCommit":os.environ.get("GITHUB_SHA"),
         "stages":[],"nativeDiagnosticCompleted":False,"nativeQualityAccepted":False,"simulationExecuted":False,
         "actualCfdRunVerified":False,"qualifiedBaseline":False,"npsh3Qualified":False,"physicalTransientExecuted":False,
@@ -96,8 +115,8 @@ def run(geometry_directory, output_directory):
             report.update(nativeQualityAccepted=True,mergedNativeMeshEvidence=evidence,status="GEOMETRY_PILOT_NATIVE_QUALITY_ACCEPTED")
         except BASE.CaseIssue as error:
             report.update(status="GEOMETRY_PILOT_NATIVE_QUALITY_CORRECTION_REQUIRED",qualityAction=str(error)[:500])
-        current_bound = geometry.verify_output(geometry_directory)
-        require(current_bound["reportFile"] == prepared["agglomerationReport"] and current_bound["report"]["volumeMeshDerived"] is True,
+        current_bound = bind_geometry(geometry_directory,geometry_kind)
+        require(current_bound["reportFile"] == prepared["derivedGeometryReport"] and current_bound["report"]["volumeMeshDerived"] is True,
                 "The independent derived mesh report changed during native inspection.")
         require(time.monotonic()<deadline,"The native diagnostic deadline was exceeded.")
     except Exception as error:
@@ -115,9 +134,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--geometry-directory",type=Path,required=True)
     parser.add_argument("--output-directory",type=Path,required=True)
+    parser.add_argument("--geometry-kind",choices=GEOMETRY_KINDS,default="protected-union")
     args = parser.parse_args()
     try:
-        return run(args.geometry_directory,args.output_directory)
+        return run(args.geometry_directory,args.output_directory,args.geometry_kind)
     except Exception as error:
         print(json.dumps({"status":"GEOMETRY_PILOT_DIAGNOSTIC_PREPARATION_REQUIRED","action":str(error)[:500],
             "nativeQualityAccepted":False,"actualCfdRunVerified":False,"mainApplicationWrites":False}));return 2

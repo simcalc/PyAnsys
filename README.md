@@ -395,3 +395,16 @@ complete tetra face incidence and the unchanged independent native mesh and
 baseline checks. Invalid volume topology is rejected before an interior
 optimiser is invoked. The existing 900-second, one-CPU, 2-GiB meshing and
 sub-million-cell trial budgets remain unchanged.
+
+The quality pilot also offers an explicitly separate `determinant-repair`
+policy. It targets the independently measured low-determinant original hexes,
+including boundary-adjacent cells, without changing the protected three-ring
+prototype. At most 32 disjoint pairs may be selected. Each union must improve
+the target determinant, preserve a passing partner, retain every original
+point and boundary polygon, and pass positive-volume/manifold and the pinned
+native concavity formula. Retained planar split faces are rejected by that
+formula. The authored policy, actual source-target JSON and complete source
+cell/face maps are immutable, and every remaining source failure is counted.
+Zero admissible pairs produces a diagnostic with no derived volume. A produced
+prototype proceeds through actual merge, NCC and unchanged full `checkMesh`;
+the diagnostic runner never invokes `foamRun` or qualifies a baseline.

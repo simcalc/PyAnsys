@@ -2,6 +2,15 @@ name: Frozen Rotor native mesh quality diagnostic and geometry pilot
 
 on:
   workflow_dispatch:
+    inputs:
+      geometry_kind:
+        description: Explicit derivation policy; determinant repair targets measured bad cells
+        required: true
+        type: choice
+        default: determinant-repair
+        options:
+          - determinant-repair
+          - protected-union
 
 permissions:
   contents: read
@@ -69,20 +78,29 @@ jobs:
             "$RUNNER_TEMP/quality-reader/bin/python" -B tools/localize_frozen_rotor_quality.py \
             --mesh-directory "$RUNNER_TEMP/frozen-quality-sources" \
             --output-report "$RUNNER_TEMP/source-quality-localization.json"
-      - name: Derive only 32 explicitly mapped protected interior cell unions
+      - name: Derive only eligible explicitly mapped original-cell unions
+        env:
+          GEOMETRY_KIND: ${{ inputs.geometry_kind }}
         shell: bash
         run: |
           set -euo pipefail
+          case "$GEOMETRY_KIND" in
+            protected-union) tool=tools/agglomerate_frozen_rotor_native.py; extra_arguments=() ;;
+            determinant-repair) tool=tools/repair_frozen_rotor_determinant.py; extra_arguments=(--source-quality-json "$RUNNER_TEMP/source-quality-localization.json") ;;
+            *) exit 2 ;;
+          esac
           sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
             systemd-run --scope --unit="frozen-quality-derive-${GITHUB_RUN_ID}" \
             -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
             /usr/bin/timeout --kill-after=10s 600s \
-            "$RUNNER_TEMP/quality-reader/bin/python" -B tools/agglomerate_frozen_rotor_native.py \
+            "$RUNNER_TEMP/quality-reader/bin/python" -B "$tool" \
             --source-directory "$RUNNER_TEMP/frozen-quality-sources" \
-            --output-dir "$RUNNER_TEMP/frozen-geometry-pilot"
+            --output-dir "$RUNNER_TEMP/frozen-geometry-pilot" "${extra_arguments[@]}"
       - name: Install checksum-pinned OpenFOAM Foundation 12
         run: bash tools/install_openfoam12.sh
       - name: Measure native geometry quality - never call foamRun
+        env:
+          GEOMETRY_KIND: ${{ inputs.geometry_kind }}
         shell: bash
         run: |
           set -euo pipefail
@@ -102,6 +120,7 @@ jobs:
             /usr/bin/timeout --kill-after=10s 630s \
             /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
             "$python_path" -B tools/run_frozen_rotor_geometry_pilot.py \
+            --geometry-kind "$GEOMETRY_KIND" \
             --geometry-directory "$RUNNER_TEMP/frozen-geometry-pilot" \
             --output-directory "$RUNNER_TEMP/frozen-geometry-native"
       - name: Retain actual diagnostics and original membership maps
@@ -112,12 +131,15 @@ jobs:
           path: |
             ${{ runner.temp }}/source-quality-localization.json
             ${{ runner.temp }}/frozen-geometry-pilot/agglomeration-report.json
+            ${{ runner.temp }}/frozen-geometry-pilot/determinant-repair-report.json
+            ${{ runner.temp }}/frozen-geometry-pilot/derivation-policy.json
             ${{ runner.temp }}/frozen-geometry-pilot/impeller-case/sourceCellToDerivedCellIds
             ${{ runner.temp }}/frozen-geometry-pilot/impeller-case/removedSourceFaceIds
             ${{ runner.temp }}/frozen-geometry-pilot/volute-case/sourceCellToDerivedCellIds
             ${{ runner.temp }}/frozen-geometry-native/*.json
             ${{ runner.temp }}/frozen-geometry-native/logs/*.log
-            ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/sets/underdeterminedCells
+            ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/sets/*
             ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/cellZones
+            ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/boundary
           if-no-files-found: error
           retention-days: 1

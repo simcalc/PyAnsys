@@ -15,11 +15,11 @@ BASE = runner.BASE
 
 
 class GeometryOnlyLifecycle(unittest.TestCase):
-    def execute_fixture(self, root, *, mesh_ok=False, execution_error=False, changed_source=False):
+    def execute_fixture(self, root, *, mesh_ok=False, execution_error=False, changed_source=False,geometry_kind="protected-union"):
         output = root/"execution"; output.mkdir()
         bound = {"report":{"volumeMeshDerived":True},"reportFile":{"path":"agglomeration-report.json","bytes":1,"sha256":"0"*64}}
         prepared = {"components":{"synthetic":"NOT A NATIVE MESH"},"nativeCommandArguments":runner.recipe.commands(output)[:3],
-                    "agglomerationReport":bound["reportFile"]}
+                    "derivedGeometryReport":bound["reportFile"]}
         calls = []
         def execute(arguments, log, output, deadline, runtime):
             calls.append(arguments[0])
@@ -34,9 +34,9 @@ class GeometryOnlyLifecycle(unittest.TestCase):
                 patch.object(runner.native,"execute",side_effect=execute),\
                 patch.object(quality,"inspect",return_value={"status":"SYNTHETIC_DIAGNOSTIC_NOT_CFD","nativeQualityAccepted":False}),\
                 patch.object(BASE,"verify_merged_mesh",side_effect=None if mesh_ok else BASE.CaseIssue("SYNTHETIC QUALITY FAILURE"),return_value={"syntheticFixtureNotCFD":True}),\
-                patch.object(runner.geometry,"verify_output",return_value={**bound,"reportFile":{**bound["reportFile"],"sha256":"1"*64}} if changed_source else bound),\
+                patch.object(runner,"bind_geometry",return_value={**bound,"reportFile":{**bound["reportFile"],"sha256":"1"*64}} if changed_source else bound),\
                 patch.object(runner,"print",create=True):
-            code = runner.run(root/"geometry",output)
+            code = runner.run(root/"geometry",output,geometry_kind)
         result = json.loads((output/"geometry-pilot-execution.json").read_bytes())
         return code,result,calls
 
@@ -70,6 +70,29 @@ class GeometryOnlyLifecycle(unittest.TestCase):
         self.assertEqual(code,2); self.assertFalse(result["nativeQualityAccepted"])
         self.assertFalse(result["nativeDiagnosticCompleted"])
         self.assertNotIn("foamRun",calls)
+
+
+    def test_selected_repair_uses_its_own_verifier_without_protected_union_fallback(self):
+        import repair_frozen_rotor_determinant as repair
+        with patch.object(runner.geometry,"verify_output") as old,patch.object(repair,"verify_output",return_value={"synthetic":True}) as selected:
+            self.assertEqual(runner.bind_geometry("synthetic-directory","determinant-repair"),{"synthetic":True})
+            old.assert_not_called();selected.assert_called_once_with("synthetic-directory")
+            selected.side_effect=ValueError("SYNTHETIC WRONG REPAIR INPUT")
+            with self.assertRaises(ValueError):runner.bind_geometry("synthetic-directory","determinant-repair")
+            old.assert_not_called()
+
+    def test_unknown_geometry_kind_fails_before_writing_or_launching_native_commands(self):
+        with tempfile.TemporaryDirectory() as temp,patch.object(runner.native,"context_guard") as guard:
+            target=Path(temp)/"not-created"
+            with self.assertRaises(BASE.CaseIssue):runner.run("synthetic-source",target,"automatic")
+            guard.assert_not_called();self.assertFalse(target.exists())
+
+    def test_targeted_repair_can_complete_only_diagnostics_and_never_call_solver(self):
+        with tempfile.TemporaryDirectory() as temp:
+            code,result,calls=self.execute_fixture(Path(temp),geometry_kind="determinant-repair")
+        self.assertEqual(code,0);self.assertEqual(result["geometryKind"],"determinant-repair")
+        self.assertFalse(result["nativeQualityAccepted"]);self.assertFalse(result["qualifiedBaseline"])
+        self.assertEqual(calls,["mergeMeshes","createNonConformalCouples","checkMesh"])
 
 
 if __name__=="__main__":
