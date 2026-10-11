@@ -63,6 +63,16 @@ SDK version 0.42.2 matches the existing optional CFD adapter's declared pin. Suc
 
 ## Isolation and provenance
 
-Only this authored setup, tests and documentation are tracked. No Main application source, manufacturer data, geometry, study snapshots, database, secret or credential is copied. The GitHub publication token exists only in the release step and is not recorded in output. The top-level MIT license covers this repository's authored helpers; original downloaded wheels retain their own upstream licenses. Existing published release assets are preserved and rechecked on subsequent runs; no claim of GitHub platform-enforced release immutability is made.
+Only authored setup, tests and documentation are tracked. Main application source, manufacturer data, study snapshots, database, secrets and credentials are excluded. The separate Frozen Rotor learning release below contains only the official Ansys educational example and meshes. The GitHub publication token exists only in the SDK release step and is not recorded in output. The top-level MIT license covers this repository's authored helpers; original downloaded wheels and educational files retain their upstream notices. Existing published release assets are preserved and rechecked; no claim of GitHub platform-enforced release immutability is made.
 
 The fixed workflow action commits are official `actions/checkout` v7.0.1 and `actions/setup-python` v7.0.0. Required dependency versions are frozen in each release's `requirements-resolved.txt`, with one SHA-256 per downloaded wheel. A future dependency change requires a separately reviewed release.
+
+## Impeller–Volute Frozen Rotor learning example
+
+The [learning release](https://github.com/simcalc/PyAnsys/releases/tag/frozen-rotor-learning-20261011) provides the byte-verified official `frozen_rotor_workflow.py`, unexecuted notebook and both **actual native HDF5 meshes**, with upstream MIT notices and SHA-256 provenance. The original source-only ZIP is also preserved separately. `Code → Download ZIP` contains helpers; download the complete learning package from Releases.
+
+Meshes are pinned to official `ansys/example-data` commit `8ef505f6ef699eeec68a16001df91ba353342f40`. They total **48,520,015 bytes**; the source ZIP alone is **34,935 bytes**. The installer verifies native mesh bytes against their Git LFS object SHA-256 values; pointer files cannot pass.
+
+This package was prepared without executing the supplied script, launching Fluent or producing a case/result. It is a **steady single-phase MRF example**, not a cavitation pressure sweep, NPSHr qualification or physical transient run. Native licensed Fluent **2025 R2 or later** is required for actual execution. The source's angular unit mapping, material/report constants, absolute pressure datum, mesh/interface and four-process resource setting require explicit native checks before solving. Read `README-learning.txt` and `example-provenance.json` first. These source settings do not override the separate CFD worker limits.
+
+`tools/build_learning_package.py` packages only the exact reviewed official file inventory and refuses checksum mismatches or solver-result claims. It does not import or run tutorial code. The learning bundle is separate from the Linux SDK wheel bundle; neither supplies the proprietary Fluent solver.
