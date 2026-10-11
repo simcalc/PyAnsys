@@ -47,7 +47,8 @@ def fixture(root):
         distribution = (2,2,2,2,2,1,1) if component == "impeller" else (3,3,3,3)
         patches, offset, pins[component] = [], 0, []
         for (zone,name,kind,_,_,_), count in zip(original, distribution):
-            raw = stl(CUBE[offset:offset+count]); offset += count
+            separated = CUBE + (3. if component == "volute" else 0.)
+            raw = stl(separated[offset:offset+count]); offset += count
             digest = sha256(raw).hexdigest()
             pins[component].append((zone,name,kind,count,count,digest))
             filename = f"{component}-zone-{zone}.stl"
@@ -188,10 +189,14 @@ class SnappyPreparationTests(unittest.TestCase):
                 for flag in case.FALSE_FLAGS:
                     self.assertIs(report[flag],False)
                 self.assertTrue(report["sourceSurfaceGeometryPrerequisiteVerified"])
+                self.assertEqual(report["components"][0]["backgroundMesh"],report["components"][1]["backgroundMesh"])
+                self.assertLess(report["components"][0]["backgroundMesh"]["minimum"][0],0)
+                self.assertGreater(report["components"][0]["backgroundMesh"]["maximum"][0],4)
                 for component in report["components"]:
                     folder=output/component["caseDirectory"]
                     snappy=(folder/"system/snappyHexMeshDict").read_text()
-                    self.assertIn("castellatedMesh true; snap true; addLayers false;",snappy)
+                    self.assertIn("castellatedMesh true; snap false; addLayers false;",snappy)
+                    self.assertIn("level (2 2)",snappy)
                     self.assertIn("insidePoint ",snappy)
                     self.assertNotIn("locationInMesh",snappy)
                     self.assertIn("minDeterminant 0.001",snappy)

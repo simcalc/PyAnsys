@@ -483,10 +483,11 @@ so that run correctly remains red and never invokes `foamRun`.
 
 The separate manual `Frozen Rotor approximate snappyHexMesh volume pilot`
 workflow starts from freshly bound tagged surfaces and actual surface checks
-on the same commit. It authors an approximately isotropic padded background
-box, source-derived interior seeds verified by three nondegenerate rays,
-feature extraction, castellated refinement and snapping. Boundary layers are
-disabled for this initial geometry pilot; wall resolution and convergence
+on the same commit. The current recipe authors one common approximately
+isotropic padded background grid for both components (largest extent divided
+by 44), source-derived interior seeds verified by three nondegenerate rays,
+feature extraction and fixed level-2 surface refinement. Snapping and boundary
+layers are disabled for this explicitly staircase approximation. Wall resolution and convergence
 remain unqualified. One source coordinate unit equals one metre by declared
 classroom assumption only. Original volume meshes remain unchanged.
 
@@ -504,3 +505,13 @@ admit geometry accuracy, a steady MRF solution, pressure-sweep NPSHr, physical
 transient, wall resolution, mesh/time convergence or actual restart. A native
 mesh success and those subsequent engineering acceptance stages remain
 separate results.
+
+The earlier snapped trial
+[38173480933](https://github.com/simcalc/PyAnsys/actions/runs/38173480933)
+completed an impeller volume with **60,637 cells**. The full independent native
+check rejected **16 isolated one-cell regions with zero determinant** and
+**1,959 concave cells**. All native logs and raw failed-cell sets were retained;
+no flow solver ran. The common-grid castellated-only recipe is a distinct
+bounded trial, not a reclassification of that failed mesh. Smooth-wall geometry
+accuracy, passage fidelity and physical pump performance remain unqualified
+even if its subsequent native quality/interface checks pass.

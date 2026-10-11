@@ -27,7 +27,7 @@ MAX_COMPONENT_CELLS = 450000
 MAX_COMBINED_CELLS = 1000000  # Actual admission is strictly less than this.
 MAX_MEMORY_BYTES, MAX_WORKSPACE_BYTES, MAX_SECONDS = 4 * 1024**3, 1024**3, 900
 MAX_FILE_BYTES, MAX_REPORT_BYTES = 128 * 1024**2, 128 * 1024
-MAX_CANDIDATES, BASE_DIVISIONS, MAX_LEVEL = 64, 24, 2
+MAX_CANDIDATES, BASE_DIVISIONS, MAX_LEVEL = 64, 44, 2
 BACKGROUND_PATCH = "backgroundBox"
 RELATIVE_RAY_TOLERANCE, BARYCENTRIC_TOLERANCE = 1e-12, 1e-10
 SOURCE_COMMIT = surface_check.SOURCE_COMMIT
@@ -61,7 +61,11 @@ REPORT_KEYS = {"schemaVersion", "createdAt", "status", "exampleDataCommit", "fou
     "requiredAcceptance", "claimBoundary", "references", *FALSE_FLAGS}
 STATUS = "APPROXIMATE_CLASSROOM_MESH_RECIPE_PREPARED_NATIVE_ACCEPTANCE_REQUIRED"
 CLASSROOM_ASSUMPTIONS = {"metresPerSourceCoordinateUnit": 1, "coordinateUnits": "UNVERIFIED",
-    "surfaceApproximation": "Pinned original-HDF5 polygons were fan-triangulated and stored as float32 STL. OBJ preserves those triangles; snappy snapping creates a distinct approximate boundary mesh and no native node/face identity is claimed.",
+    "surfaceApproximation": "Pinned original-HDF5 polygons were fan-triangulated and stored as float32 STL. OBJ preserves those triangles; castellated-only meshing creates a distinct staircase boundary mesh on one common background grid. Snapping and layers are disabled; no native node/face identity or smooth-wall geometry accuracy is claimed.",
+    "recipe": {"backgroundLargestExtentDivisions": BASE_DIVISIONS, "commonBackgroundGrid": True,
+               "surfaceRefinementLevel": MAX_LEVEL, "snappingEnabled": False,
+               "maximumBackgroundCells": 100000,
+               "priorTrial": "38173480933: snapped impeller 60637 cells; 16 isolated zero-determinant cells and 1959 concave cells rejected by unchanged full checkMesh."},
     "wallResolutionQualified": False, "layersEnabled": False, "rotationOrFlowPhysicsAuthored": False,
     "insidePoint": "Measured surface-facet candidates with explicit three-ray parity, closest-triangle distance and grid-plane avoidance; no original fluid-cell centre is claimed."}
 LIMITS = {"maximumSeconds": MAX_SECONDS, "maximumCpus": 1, "maximumMemoryBytes": MAX_MEMORY_BYTES,
@@ -226,10 +230,10 @@ def background_mesh(triangles):
     lower, upper = minimum - .1 * span, maximum + .1 * span
     h = float((upper - lower).max()) / BASE_DIVISIONS
     counts = np.maximum(4, np.ceil((upper - lower) / h).astype(np.int64))
-    require(int(np.prod(counts)) <= 50000, "The authored background trial must remain below 50,000 cells.")
+    require(int(np.prod(counts)) <= 100000, "The authored background trial must remain below 100,000 cells within the unchanged worker limits.")
     return {"minimum": lower.tolist(), "maximum": upper.tolist(), "cellCounts": counts.tolist(),
             "initialCellCount": int(np.prod(counts)), "cellWidthsNativeUnits": ((upper - lower) / counts).tolist(),
-            "basis": "Measured complete source surface bounds, padded on every side by 10% of the largest source extent; approximately isotropic background cells with largest extent divided by 24."}
+            "basis": "Common measured bounds of both complete source surfaces, padded on every side by 10% of the largest source extent; approximately isotropic background cells with largest extent divided by " + str(BASE_DIVISIONS) + "."}
 
 
 def ray_parity(point, triangles, direction):
@@ -358,11 +362,11 @@ def case_files(component, component_surface, background, seed):
     mesh += "blocks (hex (0 1 2 3 4 5 6 7) " + vector(background["cellCounts"]) + " simpleGrading (1 1 1));\nedges ();\nboundary\n(\n"
     mesh += BACKGROUND_PATCH + " {type patch; faces ((0 4 7 3)(1 2 6 5)(0 1 5 4)(3 7 6 2)(0 3 2 1)(4 5 6 7));}\n);\nmergePatchPairs ();\n"
     regions = "\n".join(name + " {name " + name + ";}" for name in (row["name"] for row in component_surface["patches"]))
-    refinements = "\n".join(row["name"] + " {level (1 2); patchInfo {type " + ("wall" if row["sourceZoneType"] == 3 else "patch") + ";}}" for row in component_surface["patches"])
-    snappy = header("snappyHexMeshDict") + "castellatedMesh true; snap true; addLayers false;\ngeometry\n{\n"
+    refinements = "\n".join(row["name"] + " {level (2 2); patchInfo {type " + ("wall" if row["sourceZoneType"] == 3 else "patch") + ";}}" for row in component_surface["patches"])
+    snappy = header("snappyHexMeshDict") + "castellatedMesh true; snap false; addLayers false;\ngeometry\n{\n"
     snappy += component + " {type triSurfaceMesh; file \"" + component + "-union.obj\"; regions {\n" + regions + "\n}}\n}\n"
     snappy += "castellatedMeshControls\n{\nmaxLocalCells 450000; maxGlobalCells 450000; minRefinementCells 0; maxLoadUnbalance 0.1; nCellsBetweenLevels 3; resolveFeatureAngle 30; allowFreeStandingZoneFaces true; extendedRefinementSpan true;\n"
-    snappy += "features ({file \"" + component + "-union.eMesh\"; level 2;});\nrefinementSurfaces {" + component + " {level (1 2); regions {\n" + refinements + "\n}}}\nrefinementRegions {};\ninsidePoint " + vector(seed["pointNativeUnits"]) + ";\n}\n"
+    snappy += "features ({file \"" + component + "-union.eMesh\"; level 2;});\nrefinementSurfaces {" + component + " {level (2 2); regions {\n" + refinements + "\n}}}\nrefinementRegions {};\ninsidePoint " + vector(seed["pointNativeUnits"]) + ";\n}\n"
     snappy += "snapControls {nSmoothPatch 3; tolerance 2; nSolveIter 60; nRelaxIter 5; nFeatureSnapIter 10; explicitFeatureSnap true; multiRegionFeatureSnap true; implicitFeatureSnap false;}\n"
     snappy += "addLayersControls {layers {}; relativeSizes true; expansionRatio 1.2; finalLayerThickness 0.3; minThickness 0.1; nGrow 0; featureAngle 60; nRelaxIter 5; nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10; maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90; nBufferCellsNoExtrude 0; nLayerIter 0; nRelaxedIter 0;}\n"
     snappy += "meshQualityControls {maxNonOrtho 65; maxBoundarySkewness 20; maxInternalSkewness 4; maxConcave 80; minFlatness 0.5; minVol 1e-14; minTetQuality 1e-15; minArea 1e-14; minTwist 0.05; minDeterminant 0.001; minFaceWeight 0.05; minVolRatio 0.01; minTriangleTwist 0; nSmoothScale 4; errorReduction 0.75;}\nmergeTolerance 1e-6; debug 0; writeFlags ();\n"
@@ -402,10 +406,12 @@ def source_union_payloads(directory):
 
 def make_components(surface_directory, verified):
     components, payloads = [], {}
+    source_components = {row["component"]: source_triangles(surface_directory, row["component"])
+                         for row in verified["components"]}
+    background = background_mesh(np.concatenate(list(source_components.values()), axis=0))
     for surface in verified["components"]:
         name = surface["component"]
-        triangles = source_triangles(surface_directory, name)
-        background = background_mesh(triangles)
+        triangles = source_components[name]
         seed = find_inside_point(triangles, background)
         folder = name + "-case"
         component = {"component": name, "caseDirectory": folder, "cellZone": "rotating-fluid" if name == "impeller" else "stationary-fluid",
