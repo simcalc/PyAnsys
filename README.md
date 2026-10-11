@@ -339,3 +339,31 @@ bounds; excluded component copies are not sent downstream. Execution facts,
 preliminary numerical qualification, physical validation, NPSH3 and actual
 restart remain separate claims. Neither this workflow nor the lighter-mesh
 trial changes Main, its database, its engineering locks or local ports.
+
+### Measured original-volume quality and bounded cell-union diagnostic
+
+Actual run [38168328884](https://github.com/simcalc/PyAnsys/actions/runs/38168328884)
+installed the pinned OpenFOAM package, merged both preserved original volumes
+and coupled their interface. Topology, positive volumes, nonorthogonality,
+skewness and interface coverage passed. The complete `-allGeometry` check
+found **11,310 cells below the unchanged 0.001 cell-determinant threshold**;
+the actual minimum was **8.9976547569259324e-6**. The solver did **not** run.
+An exit code of zero from `checkMesh` is not accepted when its log states
+`Failed 1 mesh checks`.
+
+The new manual `Frozen Rotor native mesh quality diagnostic and geometry pilot`
+job measures source-cell determinants and boundary adjacency, derives exactly
+32 protected interior two-cell unions, then actually runs merge, interface
+coupling and the same complete native quality check with `-writeSets`.
+All source coordinates, boundary polygons and patch identities remain exact.
+The original-to-derived cell maps and the actual native failed-cell set are
+retained for one day. This pilot would contain **1,141,731 cells**, so it is
+neither a sub-million-cell mesh nor a completed quality repair.
+
+Source arithmetic is an independent replication of the Foundation-12 metric;
+native cell-set equivalence is a separate provenance check. The pilot's
+workflow completion means its diagnostic was delivered. Its report separately
+states `nativeQualityAccepted`; a false value prohibits baseline admission.
+No `foamRun`, NPSH3, physical transient, restart or mesh convergence result is
+produced by the diagnostic job. A later quality repair must explicitly declare
+changes to wall-layer cell membership and recheck every native quality gate.

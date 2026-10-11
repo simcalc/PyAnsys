@@ -151,7 +151,7 @@ def commands(output):
     case, other = Path(output).absolute() / "impeller-case", Path(output).absolute() / "volute-case"
     return [["mergeMeshes", "-case", str(case), "-addCases", '("' + str(other) + '")', "-overwrite"],
             ["createNonConformalCouples", "-case", str(case), "-overwrite"],
-            ["checkMesh", "-case", str(case), "-allGeometry", "-allTopology"], ["foamRun", "-case", str(case)]]
+            ["checkMesh", "-case", str(case), "-allGeometry", "-allTopology", "-writeSets"], ["foamRun", "-case", str(case)]]
 
 
 def prepare(converted_mesh_directory, output_directory, *, pressure_reference_absolute_pa=300000):

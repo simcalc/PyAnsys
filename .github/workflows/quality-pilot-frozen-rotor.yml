@@ -1,0 +1,123 @@
+name: Frozen Rotor native mesh quality diagnostic and geometry pilot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-native-geometry-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    name: FREE diagnostic only - no CFD solver or baseline claim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE standard runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated immutable source reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/quality-reader"
+          "$RUNNER_TEMP/quality-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/quality-reader/bin/python" -m pip check
+      - name: Verify diagnostic, topology and equation contracts
+        run: '"$RUNNER_TEMP/quality-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Download only the two checksum-pinned official sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/quality-reader/bin/python" -B - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'tools')
+          import inspect_frozen_rotor_mesh as source
+          target = Path(os.environ['RUNNER_TEMP']) / 'frozen-quality-sources'
+          target.mkdir()
+          print(json.dumps({'sourceFiles': [source.verify_file(source.download_mesh(target,name),name) for name in source.MESH_NAMES], 'mainApplicationWrites':False}))
+          PY
+      - name: Locate source cells under the unchanged native determinant formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-quality-localize-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 300s \
+            "$RUNNER_TEMP/quality-reader/bin/python" -B tools/localize_frozen_rotor_quality.py \
+            --mesh-directory "$RUNNER_TEMP/frozen-quality-sources" \
+            --output-report "$RUNNER_TEMP/source-quality-localization.json"
+      - name: Derive only 32 explicitly mapped protected interior cell unions
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-quality-derive-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 600s \
+            "$RUNNER_TEMP/quality-reader/bin/python" -B tools/agglomerate_frozen_rotor_native.py \
+            --source-directory "$RUNNER_TEMP/frozen-quality-sources" \
+            --output-dir "$RUNNER_TEMP/frozen-geometry-pilot"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Measure native geometry quality - never call foamRun
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$RUNNER_TEMP/quality-reader/bin/python"
+          test -x "$python_path"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-quality-native-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 630s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_geometry_pilot.py \
+            --geometry-directory "$RUNNER_TEMP/frozen-geometry-pilot" \
+            --output-directory "$RUNNER_TEMP/frozen-geometry-native"
+      - name: Retain actual diagnostics and original membership maps
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-quality-pilot-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/source-quality-localization.json
+            ${{ runner.temp }}/frozen-geometry-pilot/agglomeration-report.json
+            ${{ runner.temp }}/frozen-geometry-pilot/impeller-case/sourceCellToDerivedCellIds
+            ${{ runner.temp }}/frozen-geometry-pilot/impeller-case/removedSourceFaceIds
+            ${{ runner.temp }}/frozen-geometry-pilot/volute-case/sourceCellToDerivedCellIds
+            ${{ runner.temp }}/frozen-geometry-native/*.json
+            ${{ runner.temp }}/frozen-geometry-native/logs/*.log
+            ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/sets/underdeterminedCells
+            ${{ runner.temp }}/frozen-geometry-native/impeller-case/constant/polyMesh/cellZones
+          if-no-files-found: error
+          retention-days: 1

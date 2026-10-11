@@ -102,6 +102,7 @@ class OriginalCaseContracts(unittest.TestCase):
             with patch.object(case,"EXPECTED_COUNTS",counts):
                 prepared=case.prepare(root/"converted",root/"execution",pressure_reference_absolute_pa=450000)
             self.assertEqual([row[0] for row in prepared["nativeCommandArguments"]],["mergeMeshes","createNonConformalCouples","checkMesh","foamRun"])
+            self.assertEqual(prepared["nativeCommandArguments"][2][-3:],["-allGeometry","-allTopology","-writeSets"])
             self.assertEqual(prepared["limits"]["memoryBytes"],4*1024**3)
             self.assertEqual(prepared["limits"]["maximumWorkspaceBytes"],1024**3)
             self.assertEqual(prepared["classroomAssumptions"]["externalTotalPressureAbsolutePa"],450000)

@@ -112,6 +112,7 @@ jobs:
             ${{ runner.temp }}/frozen-openfoam-case/*.json
             ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.zip
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/sets/underdeterminedCells
             ${{ runner.temp }}/frozen-openfoam-case/impeller-case/postProcessing/**
           if-no-files-found: error
           retention-days: 1

@@ -231,6 +231,17 @@ def run(converted_mesh_directory, output_directory, *, pressure_reference_absolu
             stage, text = execute(arguments, output/"logs"/f"{index:02d}-{current}.log", output, deadline, runtime)
             report["stages"].append(stage)
             if current == "checkMesh":
+                # Native quality diagnostics never replace the unchanged mesh
+                # admission gate. Retain an actual bounded cell set even when
+                # checkMesh exits zero but reports failed geometry checks.
+                try:
+                    if "Mesh OK." not in text:
+                        import frozen_rotor_native_quality as quality
+                        diagnostic = quality.inspect(output/"impeller-case", output/"logs"/stage["log"])
+                        BASE.write_exclusive(output/"native-quality-diagnostic.json", BASE.inventory.bounded_json(diagnostic))
+                        report["nativeQualityDiagnostic"] = preparation.descriptor(output,"native-quality-diagnostic.json",limit=BASE.inventory.MAX_REPORT_BYTES)[1]
+                except Exception as diagnostic_error:
+                    report["nativeQualityDiagnostic"] = {"status":"QUALITY_DIAGNOSTIC_CORRECTION_REQUIRED", "message":str(diagnostic_error)[:500]}
                 report["mergedNativeMeshEvidence"] = BASE.verify_merged_mesh(output/"impeller-case", {row["component"]:row for row in prepared["components"]}, output/"logs"/stage["log"])
                 report.update(nativeGeometryQualityVerified=True, physicalWallTypesVerified=True, coupledInterfaceCoverageVerified=True)
             elif current == "foamRun":
@@ -271,7 +282,11 @@ def run(converted_mesh_directory, output_directory, *, pressure_reference_absolu
             summary.update(status="ORIGINAL_NATIVE_ACCEPTANCE_CORRECTION_REQUIRED",qualifiedBaseline=False,
                            diagnostic={"program":"native-reduction","type":type(error).__name__,"message":str(error)[:500]})
     BASE.write_exclusive(output/"openfoam-acceptance.json",BASE.inventory.bounded_json(summary))
-    print(json.dumps({key:summary[key] for key in ("status","actualCfdRunVerified","qualifiedBaseline","mainApplicationWrites")}))
+    display = {key:summary[key] for key in ("status","actualCfdRunVerified","qualifiedBaseline","mainApplicationWrites")}
+    for key in ("diagnostic", "nativeQualityDiagnostic"):
+        if key in summary:
+            display[key] = summary[key]
+    print(json.dumps(display))
     return 0 if report["actualCfdRunVerified"] else 2
 
 
