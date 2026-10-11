@@ -149,3 +149,14 @@ jobs:
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
           if-no-files-found: error
           retention-days: 1
+      - name: Retain separate actual mesh diagnostics even when quality rejects
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-reused-volume-mesh-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frozen-openfoam-case/impeller-case/constant/polyMesh/
+            ${{ runner.temp }}/frozen-openfoam-case/volute-case/constant/polyMesh/
+            ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
+          if-no-files-found: warn
+          retention-days: 1
