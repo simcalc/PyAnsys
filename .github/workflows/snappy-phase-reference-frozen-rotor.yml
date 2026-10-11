@@ -1,0 +1,109 @@
+name: Frozen Rotor approximate active cavitation high-pressure reference
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: Successful approximate MRF evidence run in this public repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: frozen-rotor-approximate-active-phase-reference
+  cancel-in-progress: false
+
+jobs:
+  reference:
+    name: FREE conditional active Schnerr-Sauer MRF reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE runner and reference inputs
+        run: |
+          python3 -B tools/public_runner_guard.py
+          python3 -B tools/frozen_rotor_snappy_phase_preflight.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated immutable source reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/phase-reader"
+          "$RUNNER_TEMP/phase-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/phase-reader/bin/python" -m pip check
+      - name: Verify source, phase, pressure and equation contracts
+        run: '"$RUNNER_TEMP/phase-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Inspect and download only the admitted approximate MRF artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID" > "$RUNNER_TEMP/source-run.json"
+          gh api "repos/simcalc/PyAnsys/actions/runs/$BASELINE_RUN_ID/artifacts" > "$RUNNER_TEMP/source-artifacts.json"
+          "$RUNNER_TEMP/phase-reader/bin/python" -B tools/frozen_rotor_snappy_phase_preflight.py --run-json "$RUNNER_TEMP/source-run.json" --artifacts-json "$RUNNER_TEMP/source-artifacts.json" > "$RUNNER_TEMP/source-admission.json"
+          cat "$RUNNER_TEMP/source-admission.json"
+          artifact_id="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifactId"])' "$RUNNER_TEMP/source-admission.json")"
+          python -c 'import os,resource,sys; resource.setrlimit(resource.RLIMIT_FSIZE,(1073741824,1073741824)); os.execvp("timeout",["timeout","--kill-after=10s","300s","gh","api","repos/simcalc/PyAnsys/actions/artifacts/"+sys.argv[1]+"/zip"])' "$artifact_id" > "$RUNNER_TEMP/source-artifact.zip"
+          "$RUNNER_TEMP/phase-reader/bin/python" -B tools/frozen_rotor_snappy_phase_source.py --archive "$RUNNER_TEMP/source-artifact.zip" --admission-json "$RUNNER_TEMP/source-admission.json" --output-directory "$RUNNER_TEMP/source-artifact"
+          test -d "$RUNNER_TEMP/source-artifact/frozen-snappy-baseline"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Prepare and execute only the conditional active high-pressure reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$RUNNER_TEMP/phase-reader/bin/python"
+          test -x "$python_path"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+            systemd-run --scope --unit="frozen-snappy-phase-reference-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 1260s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_snappy_phase.py \
+            --baseline-case-directory "$RUNNER_TEMP/source-artifact/frozen-snappy-baseline" \
+            --output-directory "$RUNNER_TEMP/frozen-snappy-phase-reference"
+      - name: Reduce actual active-phase reference with independent numerical gates
+        run: '"$RUNNER_TEMP/phase-reader/bin/python" -B tools/reduce_frozen_rotor_snappy_phase.py --execution-directory "$RUNNER_TEMP/frozen-snappy-phase-reference"'
+      - name: Retain source admission and actual active-phase evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-snappy-phase-reference-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/source-admission.json
+            ${{ runner.temp }}/source-run.json
+            ${{ runner.temp }}/source-artifacts.json
+            ${{ runner.temp }}/source-artifact/source-transfer.json
+            ${{ runner.temp }}/frozen-snappy-phase-reference/**
+          if-no-files-found: error
+          retention-days: 1

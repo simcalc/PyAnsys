@@ -538,7 +538,7 @@ The earlier snapped trial
 completed an impeller volume with **60,637 cells**. The full independent native
 check rejected **16 isolated one-cell regions with zero determinant** and
 **1,959 concave cells**. All native logs and raw failed-cell sets were retained;
-no flow solver ran. The common-grid castellated-only recipe is a distinct
+no flow solver ran. The subsequent common-grid castellated-only recipe was a distinct
 bounded trial, not a reclassification of that failed mesh. Smooth-wall geometry
 accuracy, passage fidelity and physical pump performance remain unqualified
 even if its subsequent native quality/interface checks pass.
@@ -631,4 +631,32 @@ solver. Actual active-phase noncavitating H0, conservation and stationarity
 must be checked before any pressure sweep uses the three-percent head-drop
 criterion. The single-phase baseline head is not active-phase H0. NPSHr,
 sliding motion, physical transient, restart and geometric accuracy remain
-unqualified. The current failed NCC mesh cannot be admitted by this helper.
+unqualified. A failed native mesh or NCC interface cannot be admitted by this helper.
+
+The manual `Frozen Rotor approximate active cavitation high-pressure reference`
+workflow accepts only the run ID of a successful approximate MRF workflow in
+this same public repository. It verifies the source commit, artifact identity,
+expiry, byte count and complete GitHub artifact SHA-256 before safely extracting
+only the bound baseline package. Source transfer is not numerical acceptance;
+the preparation helper independently re-reduces the actual baseline evidence.
+
+The new native runner checks the pinned Foundation-12 runtime, unchanged mesh,
+source-bound controls and initial fields. Two full native mesh checks precede
+the active Schnerr–Sauer solve, with one CPU, 4 GiB memory, 1200 seconds and
+1 GiB workspace limits. A separate reducer checks absolute pressure, field
+units, complete time sampling, residuals, continuity, signed mass conservation,
+NCC coverage, stationary head/flow and negligible vapour. Only this actual
+active-phase result may provide its phase-family reference head. Native command
+completion is retained independently from numerical acceptance; workflow success
+requires the numerical reducer to pass. These tools have contract tests, but
+that does not establish an actual phase solution, pressure sweep, NPSHr,
+sliding-mesh transient, convergence or restart.
+
+The uniform source-snapped trial
+[38178994824](https://github.com/simcalc/PyAnsys/actions/runs/38178994824)
+retained **121,218 impeller cells**, but the full native check rejected
+**47 concave cells**. Positive volume, determinant, non-orthogonality and skew
+checks passed independently. The volute, coupled interface and MRF solve were
+not executed. Native logs, primitive mesh, selection maps and failed-cell sets
+are retained for geometric diagnosis. The conditional active-phase workflow
+has not been executed and cannot use this failed trial as its source.
