@@ -444,6 +444,55 @@ def _quality(gmsh, cell_tags):
     return result
 
 
+def duplicate_volume_connectivity(cells, tags):
+    if len(cells) != len(tags):
+        raise RemeshIssue("Actual cell tags and connectivity must have matching counts.")
+    first, samples, duplicate_count = {}, [], 0
+    for tag, cell in zip(tags, cells):
+        key = tuple(sorted(cell))
+        if len(key) != 4 or len(set(key)) != 4:
+            raise RemeshIssue("An exact four-distinct-node tetrahedron is required.")
+        if key in first:
+            duplicate_count += 1
+            if len(samples) < 5:
+                samples.append({"firstElementId": first[key], "duplicateElementId": tag, "globalNodeIds": list(key)})
+        else:
+            first[key] = tag
+    return {"actualVolumeCellCount": len(cells), "uniqueConnectivityCount": len(first),
+            "duplicateConnectivityCount": duplicate_count, "samples": samples,
+            "criterion": "Exact sorted four global node IDs within this volume entity; no distance tolerance or node welding."}
+
+
+def remove_measured_volume_duplicates(gmsh, volume, name, progress, points, tags, cells):
+    before = duplicate_volume_connectivity(cells, tags)
+    if before["duplicateConnectivityCount"] == 0:
+        return points, tags, cells
+    # Same-node elements can have different winding. Reject every nonpositive
+    # cell before the native set operation, rather than choosing its sign.
+    tetra_metrics(cells, points)
+    _quality(gmsh, tags)
+    before_keys = {tuple(sorted(cell)) for cell in cells}
+    evidence = {"before": before, "nativeMethod": "gmsh.model.mesh.removeDuplicateElements([(3, volume)])",
+                "sourceBoundaryIncluded": False, "nodeWeldingPerformed": False,
+                "pointsChanged": None, "everyUniqueVolumeConnectivityRetained": False,
+                "nativeReturned": False}
+    progress["exactVolumeDuplicateRemoval"] = evidence
+    checkpoint(progress, "exact-native-volume-duplicate-removal")
+    gmsh.model.mesh.removeDuplicateElements([(3, volume)])
+    evidence["nativeReturned"] = True
+    gmsh.model.mesh.rebuildElementCache(onlyIfNecessary=False)
+    after_points, after_tags, after_cells = inspect_exported_volume(gmsh, volume, name, progress)
+    evidence["after"] = duplicate_volume_connectivity(after_cells, after_tags)
+    evidence["pointsChanged"] = after_points != points
+    if after_points != points or {tuple(sorted(cell)) for cell in after_cells} != before_keys:
+        raise RemeshIssue("Exact duplicate removal must retain every point and every unique volume connectivity.")
+    if len(after_cells) != len(before_keys) or evidence["after"]["duplicateConnectivityCount"]:
+        raise RemeshIssue("Native exact duplicate removal must leave precisely one cell per original unique connectivity.")
+    evidence["everyUniqueVolumeConnectivityRetained"] = True
+    checkpoint(progress, "exact-native-volume-duplicate-removal-verified")
+    return after_points, after_tags, after_cells
+
+
 def inspect_exported_volume(gmsh, volume, name, progress):
     node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
     if not 4 <= len(node_tags) <= MAX_NEW_NODES_PER_COMPONENT or len(coordinates) != 3*len(node_tags):
@@ -466,6 +515,7 @@ def inspect_exported_volume(gmsh, volume, name, progress):
         raise RemeshIssue("The tetra-fill exceeds the fixed per-component cell budget.")
     tags = [int(tag) for tag in tag_sets[0]]
     cells = [tuple(int(node) for node in node_sets[0][i:i+4]) for i in range(0, len(node_sets[0]), 4)]
+    progress["generatedVolumeDiagnostics"]["exactDuplicateConnectivity"] = duplicate_volume_connectivity(cells, tags)
     progress["generatedVolumeDiagnostics"]["tetraCoordinateAndDeterminant"] = tetra_coordinate_diagnostics(cells, points)
     progress["generatedVolumeDiagnostics"]["nativeQualityMetrics"] = measured_quality_diagnostics(gmsh, tags)
     interior = progress.get("interiorOptimisationDiagnostics")
@@ -482,6 +532,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     progress["surfaceZoneBindings"] = []
     progress.pop("generatedVolumeDiagnostics", None)
     progress.pop("interiorOptimisationDiagnostics", None)
+    progress.pop("exactVolumeDuplicateRemoval", None)
     checkpoint(progress, "native-boundary-validation")
     zones, owners, native_audit = source_triangles(model)
     used = sorted({node for triangle in owners for node in triangle})
@@ -546,6 +597,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         evidence["elementCacheRebuiltAfterOptimisation"] = True
         del points, tags, cells  # Retain bounded summaries, not both pre/post cell arrays.
         points, tags, cells = inspect_exported_volume(gmsh, volume, name, progress)
+        points, tags, cells = remove_measured_volume_duplicates(gmsh, volume, name, progress, points, tags, cells)
         evidence["after"] = progress["generatedVolumeDiagnostics"]
         after_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
         after_groups, after_audit = preserved_boundary(after_surfaces, owners, originals, native_points, points)
@@ -603,6 +655,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         raise RemeshIssue("The actual serialized mesh must preserve every generated node and volume cell.")
     serialization["everyPublishedCellPositiveVolumeVerified"] = True
     serialization["independentSerializedAdmissionReader"] = "frozen_rotor_openfoam_case.msh_inventory"
+    serialization["publishedNativeBoundaryIdentity"] = verify_published_boundary(target, zones)
     result = {"sourceMesh": name, "generatedFile": {"name": target.name, "bytes": target.stat().st_size, "sha256": digest.hexdigest(), "format": "gmsh-msh2.2-ascii"},
               "sourceCellCount": model["nativeCounts"]["cellCount"], "sourceNodeCount": model["nativeCounts"]["nodeCount"],
               "generatedCellCount": len(cells), "generatedNodeCount": len(points), "sourceBoundaryAudit": native_audit,
@@ -616,6 +669,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
               "cellMetrics": metrics, "nativeBoundaryVolumeClosure": closure, "gmshQuality": quality, "boundaryZones": boundary_rows,
               "optimisation": optimisation,
               "interiorOptimisationDiagnostics": progress.get("interiorOptimisationDiagnostics"),
+              "exactVolumeDuplicateRemoval": progress.get("exactVolumeDuplicateRemoval"),
               "volumePhysicalGroup": "rotating-fluid" if component == "impeller" else "stationary-fluid",
               "equationStages": [{"input": {"sourceBoundaryBoundsNative": native_box, "sizingDivisor": SIZING_DIVISOR, "assumedMetresPerNativeUnit": 1},
                   "equation": "h_trial = max(xmax-xmin, ymax-ymin, zmax-zmin) / 32",
@@ -625,6 +679,43 @@ def remesh_component(model, name, destination, gmsh, np, progress):
                    "substitution": metrics, "result": {"value": metrics["totalTetraVolumeAssumedM3"], "unit": "m3 under explicit classroom scale assumption"}}]}
     gmsh.model.remove()
     return result
+
+
+def verify_published_boundary(target, zones):
+    """Compare every written oriented triangle and physical zone to the source."""
+    def cyclic(face):
+        face=tuple(face)
+        return min(face[index:]+face[:index] for index in range(3))
+    expected={zone["zoneId"]:{cyclic(face) for face in zone["triangles"]} for zone in zones}
+    if sum(len(rows) for rows in expected.values()) != sum(len(zone["triangles"]) for zone in zones):
+        raise RemeshIssue("The complete source boundary must have unique oriented triangles.")
+    checked, sections = 0, 0
+    with Path(target).open("rb") as source:
+        for line in source:
+            if line.strip() != b"$Elements":
+                continue
+            sections += 1
+            count_line=next(source,b"")
+            if sections != 1 or not re.fullmatch(rb"\d+\s*",count_line):
+                raise RemeshIssue("A complete unique actual serialized element section is required.")
+            for _ in range(int(count_line)):
+                values=[int(value) for value in next(source,b"").split()]
+                if len(values)<3:
+                    raise RemeshIssue("Serialized element records must be complete.")
+                if values[1]!=2:
+                    continue
+                if values[2]<2 or len(values)!=3+values[2]+3:
+                    raise RemeshIssue("Each written boundary triangle requires its exact physical group.")
+                zone=values[3];face=cyclic(values[3+values[2]:])
+                if zone not in expected or face not in expected[zone]:
+                    raise RemeshIssue("Every serialized boundary triangle must retain native winding, node IDs and source-zone ownership.")
+                expected[zone].remove(face);checked+=1
+            if next(source,b"").strip()!=b"$EndElements":
+                raise RemeshIssue("The actual complete serialized element terminator is required.")
+    if sections!=1 or any(expected.values()):
+        raise RemeshIssue("The serialized boundary must account for every exact source triangle once.")
+    return {"actualTriangleCount":checked,"everyNativeOrientedTriangleAndZoneVerified":True,
+            "nativeGlobalNodeIdsPreserved":True,"nativeWindingPreserved":True,"sourceZoneOwnershipPreserved":True}
 
 
 def preserve_msh2_float64_nodes(target, points):

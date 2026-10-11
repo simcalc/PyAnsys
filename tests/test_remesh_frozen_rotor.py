@@ -24,6 +24,38 @@ FACES = [(1, 3, 2), (1, 2, 4), (2, 3, 4), (3, 1, 4)]
 
 
 class RemeshContracts(unittest.TestCase):
+    def test_exact_volume_duplicates_are_measured_without_distance_tolerance(self):
+        result=remesh.duplicate_volume_connectivity([(1,2,3,4),(2,3,1,4),(1,2,3,5)],[11,12,13])
+        self.assertEqual(result['duplicateConnectivityCount'],1)
+        self.assertEqual(result['uniqueConnectivityCount'],2)
+        self.assertEqual(result['samples'][0]['globalNodeIds'],[1,2,3,4])
+        with self.assertRaises(remesh.RemeshIssue):remesh.duplicate_volume_connectivity([(1,1,3,4)],[1])
+
+    def test_native_duplicate_removal_retains_all_points_unique_cells_and_positive_orientation(self):
+        from unittest.mock import Mock
+        mesh=SimpleNamespace(removeDuplicateElements=Mock(),rebuildElementCache=Mock())
+        gmsh=SimpleNamespace(model=SimpleNamespace(mesh=mesh))
+        cells=[(1,2,3,4),(2,3,1,4)]
+        with patch.object(remesh,'_quality',return_value={}),patch.object(remesh,'checkpoint'),\
+             patch.object(remesh,'inspect_exported_volume',return_value=(POINTS,[11],[cells[0]])):
+            progress={}
+            result=remesh.remove_measured_volume_duplicates(gmsh,99,'impeller',progress,POINTS,[11,12],cells)
+            self.assertEqual(result,(POINTS,[11],[cells[0]]))
+            mesh.removeDuplicateElements.assert_called_once_with([(3,99)])
+            mesh.rebuildElementCache.assert_called_once_with(onlyIfNecessary=False)
+            self.assertTrue(progress['exactVolumeDuplicateRemoval']['everyUniqueVolumeConnectivityRetained'])
+        for after in (({**POINTS,4:(0.,0.,2.)},[11],[cells[0]]),(POINTS,[11],[(1,2,3,5)]),(POINTS,[11,12],cells)):
+            with self.subTest(after=after),patch.object(remesh,'_quality',return_value={}),patch.object(remesh,'checkpoint'),\
+                 patch.object(remesh,'inspect_exported_volume',return_value=after),self.assertRaises(remesh.RemeshIssue):
+                remesh.remove_measured_volume_duplicates(gmsh,99,'impeller',{},POINTS,[11,12],cells)
+        mesh.removeDuplicateElements.reset_mock()
+        with self.assertRaises(remesh.RemeshIssue):
+            remesh.remove_measured_volume_duplicates(gmsh,99,'impeller',{},POINTS,[11,12],[cells[0],(1,3,2,4)])
+        mesh.removeDuplicateElements.assert_not_called()
+        result=remesh.remove_measured_volume_duplicates(gmsh,99,'impeller',{},POINTS,[11],[cells[0]])
+        self.assertEqual(result,(POINTS,[11],[cells[0]]))
+        mesh.removeDuplicateElements.assert_not_called()
+
     def test_msh_coordinates_round_trip_without_repairing_topology(self):
         actual = {1:(0.,0.,1.), 2:(1.,0.,1.), 3:(0.,1.,1.), 4:(0.,0.,1.0000000000000002)}
         before = b"$MeshFormat\n2.2 0 8\n$EndMeshFormat\n$Nodes\n4\n"
@@ -48,6 +80,18 @@ class RemeshContracts(unittest.TestCase):
                     remesh.preserve_msh2_float64_nodes(target,{1:(0.,0.,0.)})
                 self.assertEqual(target.read_bytes(),raw)
                 self.assertFalse((Path(directory)/'owned.msh.roundtrip').exists())
+
+    def test_written_boundary_requires_every_exact_source_winding_and_zone(self):
+        zones=[{'zoneId':11,'triangles':[(1,2,3)]}]
+        for face,zone,accepted in (((2,3,1),11,True),((1,3,2),11,False),((1,2,3),12,False)):
+            raw=('$Elements\n1\n1 2 2 '+str(zone)+' 99 '+" ".join(map(str,face))+'\n$EndElements\n').encode('ascii')
+            with TemporaryDirectory() as directory:
+                target=Path(directory)/'owned.msh';target.write_bytes(raw)
+                if accepted:
+                    proof=remesh.verify_published_boundary(target,zones)
+                    self.assertTrue(proof['everyNativeOrientedTriangleAndZoneVerified'])
+                else:
+                    with self.assertRaises(remesh.RemeshIssue):remesh.verify_published_boundary(target,zones)
 
     def test_live_progress_does_not_promote_candidate_or_expose_extra_report_fields(self):
         with TemporaryDirectory() as directory:
