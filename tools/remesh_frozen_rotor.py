@@ -7,7 +7,7 @@ This produces meshing evidence only, never a Fluent case or CFD calculation.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -15,7 +15,9 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
+import subprocess
 import sys
 import time
 
@@ -33,6 +35,12 @@ MAX_NEW_NODES_PER_COMPONENT = 500_000
 MAX_COMBINED_CELLS = 999_999
 MAX_COMBINED_NODES = 999_999
 MAX_CLASSIFIED_SURFACES = 512
+GMSH_ALGORITHM_3D = 10  # HXT: efficient Delaunay implementation; exact facets stay fixed.
+NATIVE_TAIL_LINES = 24
+NATIVE_LINE_CHARACTERS = 240
+CHILD_ENVIRONMENT_KEYS = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "RUNNER_OS",
+    "RUNNER_ENVIRONMENT", "GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_VISIBILITY", "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_SERVER_URL", "PYTHONDONTWRITEBYTECODE")
 SIZING_DIVISOR = 32
 DISTANCE_SAMPLES_PER_ZONE = 64
 REFERENCES = ["https://gmsh.info/doc/texinfo/gmsh.html#t13",
@@ -42,6 +50,21 @@ REFERENCES = ["https://gmsh.info/doc/texinfo/gmsh.html#t13",
 
 class RemeshIssue(inventory.InspectionIssue):
     pass
+
+
+def persist_json(destination, name, value):
+    if not destination.is_dir() or destination.is_symlink() or getattr(destination, "is_junction", lambda:False)():
+        raise RemeshIssue("Evidence must remain in the new regular isolated output directory.")
+    target, temporary = destination/name, destination/(name+".part")
+    if target.is_symlink() or temporary.exists() or temporary.is_symlink() or (target.exists() and not target.is_file()):
+        raise RemeshIssue("The attempt-owned evidence path must remain a regular file.")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(inventory.bounded_json(value))
+        temporary.replace(target)
+    finally:
+        if temporary.is_file() and not temporary.is_symlink():
+            temporary.unlink()
 
 
 def checked_output(value):
@@ -133,18 +156,9 @@ def checkpoint(progress, stage):
     value = {"schemaVersion": SCHEMA, "mode": "native-boundary-preserved-tetra-fill", "stage": stage,
              "component": progress.get("component"), "journal": journal,
              "surfaceZoneBindings": progress.get("surfaceZoneBindings", []),
+             "verifiedSources": progress.get("verifiedSources", []), "gmshAlgorithm3D": GMSH_ALGORITHM_3D,
              "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
-    target = progress["destination"] / "remesh-progress.json"
-    temporary = progress["destination"] / "remesh-progress.json.part"
-    if target.is_symlink() or temporary.exists() or temporary.is_symlink():
-        raise RemeshIssue("The attempt-owned progress journal must remain a regular file.")
-    try:
-        with temporary.open("xb") as stream:
-            stream.write(inventory.bounded_json(value))
-        temporary.replace(target)
-    finally:
-        if temporary.is_file() and not temporary.is_symlink():
-            temporary.unlink()
+    persist_json(progress["destination"], "remesh-progress.json", value)
 
 
 def gmsh_diagnostic(gmsh, progress):
@@ -331,7 +345,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
     gmsh.model.setPhysicalName(3, 1, "rotating-fluid" if component == "impeller" else "stationary-fluid")
     for option, value in {"Mesh.MeshSizeMin": size, "Mesh.MeshSizeMax": size, "Mesh.MeshSizeFromPoints": 0,
                           "Mesh.MeshSizeFromCurvature": 0, "Mesh.MeshSizeExtendFromBoundary": 0,
-                          "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": 1, "Mesh.ElementOrder": 1,
+                          "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": GMSH_ALGORITHM_3D, "Mesh.ElementOrder": 1,
                           "Mesh.MshFileVersion": 2.2, "Mesh.Binary": 0, "Mesh.SaveAll": 0}.items():
         gmsh.option.setNumber(option, value)
     checkpoint(progress, "fixed-boundary-tetrahedral-fill")
@@ -423,6 +437,8 @@ def run(value):
     cache = destination.parent / "frozen-rotor-mesh-inputs"
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(),
               "attemptMode": "native-boundary-preserved-tetra-fill", "boundaryRemeshed": False,
+              "gmshAlgorithm3D": GMSH_ALGORITHM_3D, "gmshAlgorithmName": "HXT",
+              "algorithmChangeBasis": "The previous Delaunay1 fixed-boundary attempt reached its300s limit. HXT10 is the documented efficient Delaunay implementation; no geometry or source-identity gate is relaxed.",
               "surfaceReparametrizationPerformed": False,
               "exampleDataCommit": inventory.PIN, "gmshRequiredVersion": GMSH_VERSION, "references": REFERENCES,
               "coordinateUnits": "UNVERIFIED", "classroomScaleAssumption": {"nativeUnitsToMetres": 1, "verifiedFromSource": False,
@@ -447,7 +463,8 @@ def run(value):
         if gmsh.__version__ != GMSH_VERSION:
             raise RemeshIssue("Install exactly the pinned Gmsh version on the public worker.")
         gmsh.initialize([], readConfigFiles=False, run=False)
-        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.option.setNumber("General.Terminal", 1)  # Supervisor persists a bounded native tail while C++ runs.
+        gmsh.option.setNumber("General.Verbosity", 4)
         gmsh.logger.start()
         for option in ("General.NumThreads", "Mesh.MaxNumThreads1D", "Mesh.MaxNumThreads2D", "Mesh.MaxNumThreads3D"):
             gmsh.option.setNumber(option, 1)
@@ -461,6 +478,7 @@ def run(value):
             source = inventory.download_mesh(cache, name)
             provenance = inventory.verify_file(source, name)
             report["sources"].append(provenance)
+            progress["verifiedSources"] = list(report["sources"])
         for name in inventory.MESH_NAMES:
             progress["component"] = name.split(".")[0]
             checkpoint(progress, "verified-native-source-read")
@@ -526,13 +544,143 @@ def run(value):
             "actualCfdRunVerified": False, "mainApplicationWrites": False}
 
 
+def child_environment():
+    result = {key: os.environ[key] for key in CHILD_ENVIRONMENT_KEYS if key in os.environ}
+    result.update(PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    return result
+
+
+def stop_owned_worker(process):
+    """Signal only the fresh session created by this supervisor's Popen handle."""
+    if process.poll() is not None:
+        return
+    if os.getpgid(process.pid) != process.pid:
+        raise RemeshIssue("The native worker no longer owns its isolated process group.")
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None and os.getpgid(process.pid) == process.pid:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=3)
+
+
+def interrupted_report(destination, reason, tail, elapsed, returncode):
+    """Recover factual progress and hashes after owned native-worker interruption."""
+    progress = {}
+    path = destination/"remesh-progress.json"
+    if path.is_file() and not path.is_symlink() and path.stat().st_size <= inventory.MAX_REPORT_BYTES:
+        progress = json.loads(path.read_text(encoding="utf-8"))
+    before = {row["name"]:row["sha256"] for row in progress.get("verifiedSources", [])
+        if row.get("name") in inventory.MESH_NAMES and row.get("sha256") == inventory.FILES[row["name"]][1]
+        and row.get("bytes") == inventory.FILES[row["name"]][0] and row.get("sourceUrl") == inventory.mesh_url(row["name"])}
+    sources, checks = [], []
+    for name in inventory.MESH_NAMES:
+        try:
+            verified = inventory.verify_file(destination.parent/"frozen-rotor-mesh-inputs"/name, name)
+            sources.append(verified)
+            checks.append({"name":name,"beforeSha256":before.get(name),"afterSha256":verified["sha256"],
+                           "immutableVerified":before.get(name)==verified["sha256"]})
+        except (inventory.InspectionIssue, OSError):
+            checks.append({"name":name,"beforeSha256":before.get(name),"afterSha256":None,"immutableVerified":False})
+    for name in ("impeller.msh", "volute.msh"):
+        target = destination/name
+        if target.is_file() and not target.is_symlink():
+            target.unlink()  # Only outputs owned by this fresh isolated attempt.
+    report = {"schemaVersion":SCHEMA,"createdAt":datetime.now(timezone.utc).isoformat(),"exampleDataCommit":inventory.PIN,
+        "gmshRequiredVersion":GMSH_VERSION,"gmshAlgorithm3D":GMSH_ALGORITHM_3D,"gmshAlgorithmName":"HXT",
+        "attemptMode":"native-boundary-preserved-tetra-fill","status":"PREPARATION_REQUIRED","reasonCode":reason,
+        "diagnostic":{"stage":progress.get("stage","worker-startup"),"component":progress.get("component"),
+            "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[])},
+        "progressJournal":progress.get("journal",[]),"sources":sources,"postAttemptSourceVerification":checks,
+        "originalMeshesImmutable":all(row["immutableVerified"] for row in checks),"elapsedSeconds":round(elapsed,3),
+        "limits":{"threads":1,"maximumSeconds":MAX_SECONDS,"maximumAddressSpaceBytes":MAX_MEMORY_BYTES,"maximumOutputBytes":MAX_OUTPUT_BYTES},
+        "coordinateUnits":"UNVERIFIED","classroomScaleAssumption":{"nativeUnitsToMetres":1,"verifiedFromSource":False},
+        "files":[],"meshes":[],"volumeMeshGenerated":False,"boundaryRemeshed":False,"surfaceReparametrizationPerformed":False,
+        "nativeCoordinateUnitsVerified":False,"sourceGeometryFabricated":False,"nodeWeldingPerformed":False,"topologyHealingPerformed":False,
+        "nativeCaseGenerated":False,"fluentSessionConnected":False,"licenseVerified":False,"actualCfdRunVerified":False,
+        "simulationExecuted":False,"mainApplicationWrites":False,"openFoamConversionVerified":False,
+        "correctiveAction":"Review the retained native mesher tail and exact source-zone binding before a separate bounded retry.",
+        "claimBoundary":"Interrupted meshing attempt; no complete validated volume mesh, solver case or CFD result is published."}
+    persist_json(destination,"remesh-report.json",report)
+    return report
+
+
+def supervised_run(value):
+    destination = checked_output(value)
+    if sys.platform != "linux":
+        raise RemeshIssue("Run the supervised native geometry trial only on the isolated GitHub Ubuntu worker.")
+    started, tail, pending, received, timed_out = time.monotonic(), deque(maxlen=NATIVE_TAIL_LINES), b"", 0, False
+    command = [sys.executable,"-B",str(Path(__file__).resolve()),"--native-worker","--output-dir",str(destination)]
+    process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=child_environment(),
+                               start_new_session=True,bufsize=0)
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout,selectors.EVENT_READ)
+    try:
+        while selector.get_map():
+            if not timed_out and process.poll() is None and time.monotonic()-started >= MAX_SECONDS:
+                timed_out = True
+                stop_owned_worker(process)
+            events = selector.select(timeout=.1)
+            for key,_ in events:
+                chunk = os.read(key.fileobj.fileno(),4096)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                lines = (pending+chunk.replace(b"\r",b"\n")).split(b"\n")
+                pending = lines.pop()[-8192:]
+                for line in lines:
+                    text = line.decode("utf-8",errors="replace")
+                    if text.startswith("REMESH_WORKER_SUMMARY "):
+                        continue
+                    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","",text)
+                    text = "".join(character for character in text if character.isprintable() or character=="\t").strip()
+                    if text:
+                        received += 1
+                        tail.append(text[:NATIVE_LINE_CHARACTERS])
+                if destination.is_dir():
+                    persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
+                        "gmshAlgorithm3D":GMSH_ALGORITHM_3D,"elapsedSeconds":round(time.monotonic()-started,3),
+                        "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
+                        "actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
+        returncode = process.wait(timeout=3)
+        if time.monotonic()-started >= MAX_SECONDS:
+            timed_out = True  # A completed process must still satisfy this attempt's wall-clock deadline.
+    except BaseException:
+        stop_owned_worker(process)
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+    if not destination.exists():
+        destination.mkdir(parents=True)
+    persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
+        "gmshAlgorithm3D":GMSH_ALGORITHM_3D,"elapsedSeconds":round(time.monotonic()-started,3),
+        "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
+        "nativeProcessReturnCode":returncode,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
+    path = destination/"remesh-report.json"
+    report = None
+    if not timed_out and returncode in (0,2) and path.is_file() and not path.is_symlink() and path.stat().st_size <= inventory.MAX_REPORT_BYTES:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if report.get("schemaVersion") != SCHEMA or report.get("actualCfdRunVerified") is not False or report.get("mainApplicationWrites") is not False or report.get("simulationExecuted") is not False or report.get("volumeMeshGenerated") is not (returncode==0):
+            raise RemeshIssue("Native-worker evidence must preserve the exact preparation-only claim contract.")
+    if report is None:
+        reason = "CFD_CLASSROOM_MESH_WORKER_TIMEOUT" if timed_out else "CFD_CLASSROOM_MESH_WORKER_STOPPED"
+        report = interrupted_report(destination,reason,tail,time.monotonic()-started,returncode)
+    raw = path.read_bytes()
+    return {"status":report["status"],"volumeMeshGenerated":report["volumeMeshGenerated"],"reportSha256":sha256(raw).hexdigest(),
+        "reportBytes":len(raw),"files":report["files"],"totalGeneratedCells":sum(row["generatedCellCount"] for row in report["meshes"]),
+        "actualCfdRunVerified":False,"mainApplicationWrites":False}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--native-worker", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     try:
-        result = run(arguments.output_dir)
-        print(json.dumps(result, allow_nan=False))
+        result = run(arguments.output_dir) if arguments.native_worker else supervised_run(arguments.output_dir)
+        print(("REMESH_WORKER_SUMMARY " if arguments.native_worker else "")+json.dumps(result, allow_nan=False),flush=True)
         return 0 if result["volumeMeshGenerated"] else 2
     except (inventory.InspectionIssue, OSError, ValueError) as error:
         print(json.dumps({"status": "PREPARATION_REQUIRED", "reasonCode": "CFD_CLASSROOM_REMESH_REQUIRED", "action": str(error)[:500],

@@ -75,6 +75,7 @@ class PreparationContracts(unittest.TestCase):
         self.assertIn("inblock-shroud", files["0/U"])
         self.assertIn("type noSlip", files["0/U"])
         self.assertIn("kOmegaSST", files["constant/momentumTransport"])
+        self.assertIn("fields true;", files["system/createNonConformalCouplesDict"])
         self.assertIn(format(case.MU / case.RHO, ".17g"), files["constant/physicalProperties"])
         self.assertAlmostEqual(case.Q * case.RHO, 90)
         self.assertIn("volumetricFlowRate " + format(case.Q, ".17g"), case.case_files("volute")["0/U"])
@@ -89,8 +90,26 @@ class PreparationContracts(unittest.TestCase):
         self.assertIn("calcTotal yes", functions)
         self.assertIn("rho rhoInf; rhoInf 998.2", functions)
         self.assertIn("field U; result U2", functions)
+        self.assertIn("type volFieldValue", functions)
+        self.assertIn("select all; operation min; fields (p)", functions)
+        self.assertIn("select all; operation max; fields (p)", functions)
+        self.assertIn("type yPlus", functions)
+        self.assertIn("name pumpInterface_on_interface-impeller-outlet", functions)
+        self.assertIn("name pumpInterface_on_interface-volute-inlet", functions)
         self.assertNotIn("weightedAverage", functions)
         self.assertNotIn("regionType", functions)
+
+    def test_combined_case_fields_cover_both_components_and_empty_placeholder(self):
+        files = case.case_files("impeller")
+        combined = set().union(*case.PATCHES.values()) | {"defaultFaces"}
+        for name in ("0/U", "0/p", "0/k", "0/omega", "0/nut"):
+            for patch_name in combined:
+                with self.subTest(field=name, patch=patch_name):
+                    self.assertIn('"' + patch_name + '"', files[name])
+        self.assertIn("flowRateOutletVelocity", files["0/U"])
+        self.assertIn("volute-wall", files["0/omega"])
+        self.assertNotIn("volute-wall", files["system/changeDictionaryDict"])
+        self.assertNotIn("blade", case.case_files("volute")["0/U"])
 
     def input_fixture(self, root):
         root.mkdir()
@@ -190,6 +209,24 @@ class PreparationContracts(unittest.TestCase):
             for wrong in (original.replace("class vectorField","class labelList"),original.replace("object points","object other"),original.replace("format ascii","format binary")):
                 (mesh/"points").write_text(wrong)
                 with self.subTest(wrong=wrong),self.assertRaises(case.CaseIssue):case.verify_conversion(root,expected,log)
+
+    def test_wall_class_change_has_separate_native_pre_and_post_gates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);mesh,log=self.native_fixture(root)
+            expected=case.msh_inventory(MSH)
+            expected["patchFaces"]={"blade":4}
+            boundary=(mesh/"boundary").read_text().replace("inlet {", "blade {")
+            (mesh/"boundary").write_text(boundary)
+            before=case.verify_conversion(root,expected,log,after_wall_type_change=False)
+            self.assertTrue(before["conversionVerified"])
+            self.assertFalse(before["physicalWallTypesVerified"])
+            with self.assertRaises(case.CaseIssue):
+                case.verify_conversion(root,expected,log,after_wall_type_change=True)
+            (mesh/"boundary").write_text(boundary.replace("type patch;", "type wall;"))
+            after=case.verify_conversion(root,expected,log,after_wall_type_change=True)
+            self.assertTrue(after["physicalWallTypesVerified"])
+            with self.assertRaises(case.CaseIssue):
+                case.verify_conversion(root,expected,log,after_wall_type_change="false")
 
     def test_native_empty_default_placeholder_allowed_positive_unassigned_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

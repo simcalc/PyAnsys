@@ -160,6 +160,170 @@ class RemeshContracts(unittest.TestCase):
             self.assertEqual(len(report["postAttemptSourceVerification"]),2)
             self.assertEqual(report["diagnostic"]["loggerTail"],["Synthetic meshing diagnostic"])
 
+    def test_hxt_is_fixed_and_child_environment_keeps_runner_identity_without_secrets(self):
+        self.assertEqual(remesh.GMSH_ALGORITHM_3D,10)
+        with patch.dict(os.environ,{"GITHUB_REPOSITORY":"simcalc/PyAnsys","RUNNER_OS":"Linux","RUNNER_ENVIRONMENT":"github-hosted",
+                "GITHUB_ACTIONS":"true","RUNNER_TEMP":"/tmp/runner","PATH":"/bin","LD_LIBRARY_PATH":"/safe/lib",
+                "GH_TOKEN":"must-not-inherit","CFD_LICENSE_TOKEN":"must-not-inherit","SECRET_PRIVATE":"must-not-inherit"},clear=True):
+            environment=remesh.child_environment()
+        self.assertEqual(environment["GITHUB_REPOSITORY"],"simcalc/PyAnsys")
+        self.assertEqual(environment["LD_LIBRARY_PATH"],"/safe/lib")
+        self.assertEqual(environment["OMP_NUM_THREADS"],"1")
+        self.assertNotIn("GH_TOKEN",environment)
+        self.assertNotIn("CFD_LICENSE_TOKEN",environment)
+        self.assertNotIn("SECRET_PRIVATE",environment)
+
+    def test_interrupted_native_worker_report_removes_partial_mesh_and_never_claims_cfd(self):
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"trial"
+            target.mkdir()
+            remesh.persist_json(target,"remesh-progress.json",{"stage":"fixed-boundary-tetrahedral-fill","component":"impeller", "verifiedSources":[],"journal":[]})
+            (target/"impeller.msh").write_bytes(b"Interrupted native output")
+            report=remesh.interrupted_report(target,"CFD_CLASSROOM_MESH_WORKER_TIMEOUT",["Native geometry recovery"],300,-15)
+            self.assertEqual(report["diagnostic"]["stage"],"fixed-boundary-tetrahedral-fill")
+            self.assertEqual(report["diagnostic"]["loggerTail"],["Native geometry recovery"])
+            self.assertFalse(report["volumeMeshGenerated"])
+            self.assertFalse(report["originalMeshesImmutable"])
+            self.assertFalse((target/"impeller.msh").exists())
+            self.assertEqual(report["files"],[])
+
+    def test_process_group_stop_targets_only_the_owned_fresh_worker_session(self):
+        class Process:
+            pid=123456
+            def poll(self): return None
+            def wait(self,timeout): return -15
+        with patch.object(remesh.os,"getpgid",return_value=123456,create=True),patch.object(remesh.os,"killpg",create=True) as signalled:
+            remesh.stop_owned_worker(Process())
+            signalled.assert_called_once_with(123456,remesh.signal.SIGTERM)
+        with patch.object(remesh.os,"getpgid",return_value=77,create=True),patch.object(remesh.os,"killpg",create=True) as signalled:
+            with self.assertRaisesRegex(remesh.RemeshIssue,"owns its isolated"):
+                remesh.stop_owned_worker(Process())
+            signalled.assert_not_called()
+
+    def test_supervisor_keeps_only_bounded_native_tail_and_recovers_worker_report(self):
+        class Stream:
+            def fileno(self): return 123
+            def close(self): pass
+        class Process:
+            pid=123456
+            stdout=Stream()
+            def poll(self): return 2
+            def wait(self,timeout): return 2
+        class Selector:
+            active=True
+            def register(self,file,event): self.file=file
+            def get_map(self): return {1:True} if self.active else {}
+            def select(self,timeout): return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file): self.active=False
+            def close(self): pass
+        data="\n".join("Info : native step"+str(index)+" "+"x"*400 for index in range(30)).encode()+b"\n"
+        chunks=[data[index:index+4096] for index in range(0,len(data),4096)]+[b""]
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"trial"
+            def launched(*arguments,**options):
+                target.mkdir()
+                remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"PREPARATION_REQUIRED",
+                    "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,"files":[],"meshes":[]})
+                return Process()
+            with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched) as launch,\
+                 patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",side_effect=chunks):
+                summary=remesh.supervised_run(target)
+            log=json.loads((target/"gmsh-native-tail.json").read_text())
+            self.assertEqual(log["receivedNativeLineCount"],30)
+            self.assertEqual(len(log["lines"]),24)
+            self.assertTrue(all(len(row)<=240 for row in log["lines"]))
+            self.assertIn("step29",log["lines"][-1])
+            self.assertFalse(summary["volumeMeshGenerated"])
+            self.assertEqual(launch.call_args.args[0][2],str(TOOL.resolve()))
+            self.assertIn("--native-worker",launch.call_args.args[0])
+            self.assertTrue(launch.call_args.kwargs["start_new_session"])
+
+    def test_supervisor_timeout_stops_owned_worker_and_persists_diagnostic_with_source_hashes(self):
+        class Stream:
+            def fileno(self): return 123
+            def close(self): pass
+        class Process:
+            pid=123456
+            stdout=Stream()
+            result=None
+            def poll(self): return self.result
+            def wait(self,timeout): return self.result
+        class Selector:
+            active=True
+            def register(self,file,event): self.file=file
+            def get_map(self): return {1:True} if self.active else {}
+            def select(self,timeout): return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file): self.active=False
+            def close(self): pass
+        process=Process()
+        verified=[{"name":name,"bytes":remesh.inventory.FILES[name][0],"sha256":remesh.inventory.FILES[name][1],
+                   "sourceUrl":remesh.inventory.mesh_url(name)} for name in remesh.inventory.MESH_NAMES]
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"trial"
+            def launched(*arguments,**options):
+                target.mkdir()
+                remesh.persist_json(target,"remesh-progress.json",{"stage":"fixed-boundary-tetrahedral-fill","component":"impeller",
+                    "verifiedSources":verified,"journal":[],"surfaceZoneBindings":[]})
+                (target/"impeller.msh").write_bytes(b"Incomplete native output")
+                return process
+            def stopped(owned):
+                self.assertIs(owned,process)
+                owned.result=-15
+            def verify(path,name): return next(row for row in verified if row["name"]==name)
+            with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched),\
+                 patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),\
+                 patch.object(remesh.os,"read",side_effect=[b"Info : HXT boundary recovery\n",b""]),\
+                 patch.object(remesh.time,"monotonic",side_effect=[0]+[301]*20),\
+                 patch.object(remesh,"stop_owned_worker",side_effect=stopped) as stop,\
+                 patch.object(remesh.inventory,"verify_file",side_effect=verify) as checked:
+                summary=remesh.supervised_run(target)
+            report=json.loads((target/"remesh-report.json").read_text())
+            log=json.loads((target/"gmsh-native-tail.json").read_text())
+            stop.assert_called_once_with(process)
+            self.assertEqual(checked.call_count,2)
+            self.assertEqual(report["reasonCode"],"CFD_CLASSROOM_MESH_WORKER_TIMEOUT")
+            self.assertEqual(report["diagnostic"]["stage"],"fixed-boundary-tetrahedral-fill")
+            self.assertEqual(report["diagnostic"]["loggerTail"],["Info : HXT boundary recovery"])
+            self.assertTrue(report["originalMeshesImmutable"])
+            self.assertTrue(log["nativeWorkerTimedOut"])
+            self.assertEqual(log["nativeProcessReturnCode"],-15)
+            self.assertFalse(summary["volumeMeshGenerated"])
+            self.assertEqual(summary["files"],[])
+            self.assertFalse((target/"impeller.msh").exists())
+
+    def test_supervisor_rejects_completed_worker_evidence_past_wall_clock_deadline(self):
+        class Stream:
+            def fileno(self): return 123
+            def close(self): pass
+        class Process:
+            stdout=Stream()
+            def poll(self): return 0
+            def wait(self,timeout): return 0
+        class Selector:
+            active=True
+            def register(self,file,event): self.file=file
+            def get_map(self): return {1:True} if self.active else {}
+            def select(self,timeout): return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file): self.active=False
+            def close(self): pass
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"trial"
+            def launched(*arguments,**options):
+                target.mkdir()
+                remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"VOLUME_MESH_GENERATED",
+                    "volumeMeshGenerated":True,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,
+                    "files":[],"meshes":[]})
+                return Process()
+            with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched),\
+                 patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",return_value=b""),\
+                 patch.object(remesh.time,"monotonic",side_effect=[0]+[301]*20),patch.object(remesh,"stop_owned_worker") as stop:
+                summary=remesh.supervised_run(target)
+            report=json.loads((target/"remesh-report.json").read_text())
+            self.assertFalse(summary["volumeMeshGenerated"])
+            self.assertEqual(report["reasonCode"],"CFD_CLASSROOM_MESH_WORKER_TIMEOUT")
+            self.assertEqual(report["diagnostic"]["nativeProcessReturnCode"],0)
+            stop.assert_not_called()
+
     def test_output_rejects_existing_or_outside_before_runtime(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as outside, patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
             for target in (Path(root),Path(outside)/"remesh"):

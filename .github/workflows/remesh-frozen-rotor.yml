@@ -47,12 +47,15 @@ jobs:
           "$RUNNER_TEMP/volume-reader/bin/python" -m pip check
       - name: Verify geometry and equation contracts
         run: '"$RUNNER_TEMP/volume-reader/bin/python" -B -m unittest discover -s tests -v'
-      - name: Attempt native geometry reparametrization and volume meshing
+      - name: Preserve native boundaries and attempt bounded HXT volume fill
         shell: bash
         run: |
           set -euo pipefail
-          ulimit -v 2097152
-          timeout --kill-after=10s 300s "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh"
+          sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-geometry-${GITHUB_RUN_ID}" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 330s \
+            "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh"
       - name: Install checksum-pinned OpenFOAM Foundation 12
         run: bash tools/install_openfoam12.sh
       - name: Convert and inspect the actual candidate before steady MRF
@@ -85,6 +88,7 @@ jobs:
             ${{ runner.temp }}/frozen-rotor-remesh/impeller.msh
             ${{ runner.temp }}/frozen-rotor-remesh/volute.msh
             ${{ runner.temp }}/frozen-rotor-remesh/remesh-progress.json
+            ${{ runner.temp }}/frozen-rotor-remesh/gmsh-native-tail.json
             ${{ runner.temp }}/frozen-openfoam-case/openfoam-preparation.json
             ${{ runner.temp }}/frozen-openfoam-case/openfoam-execution.json
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log

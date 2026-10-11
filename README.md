@@ -131,3 +131,35 @@ The alternative solver route is **OpenFOAM on a standard public GitHub runner**.
 The [derived boundary release](https://github.com/simcalc/PyAnsys/releases/tag/frozen-rotor-boundaries-38155649489) has **11 named STL surfaces**, topology JSON, checksums and the upstream license. The boundary ZIP is **6,385,711 bytes**, SHA-256 `c1481ce15abcfb7d2336f366c73dd3565a9ea26dfbcc174d8c2c5b26708457e2`. The [topology report](https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-boundaries-38155649489/topology-report.json) is **68,245 bytes**, SHA-256 `1dc7cebaeac04506dcfbe9da3ce123f149cc94cb44c6990b9b11c3f4195d2595`. Published ZIP/report bytes were compared through anonymous HTTPS downloads on the runner, then every asset and every STL were independently verified again by the NPSH project.
 
 The polygon fan is a documented surface derivative: **124,758 impeller faces and 2,290 volute faces** have measurable nonplanarity under the recorded relative `1e-12` diagnostic. Native 3D vertices and winding are retained, while the report records plane deviation and float32 coordinate error. Subsequent mesh generation must assess the geometric effect of the chosen triangle diagonal and any remeshing. These topology results still do not establish self-intersection clearance, outward orientation, coordinate-unit basis, new volume cells, Student fit, CFD or pump NPSHr.
+
+### Full pump research stages and actual trial history
+
+The manual **Remesh Frozen Rotor educational pump volume** workflow runs on
+this public repository's standard Linux runner. It is independent of Main and
+the pump database. Source meshes are checksum-pinned and read-only. A volume
+candidate must retain the native source boundary identity, have positive
+tetrahedron volumes, fit the declared cell/node/output limits, and pass native
+OpenFOAM conversion, wall-type, interface and `checkMesh` checks.
+
+The initial volume trials have **not produced an accepted volume mesh**:
+
+| Actual run | Observed outcome |
+| --- | --- |
+| [38157229696](https://github.com/simcalc/PyAnsys/actions/runs/38157229696) | Surface classification merged source boundary zones; identity gate rejected the candidate. |
+| [38157560445](https://github.com/simcalc/PyAnsys/actions/runs/38157560445) | Native zone ownership was retained, but new surface reparametrization produced overlapping facets; volume generation rejected it. |
+| [38158266363](https://github.com/simcalc/PyAnsys/actions/runs/38158266363) | Exact native surface facets were preserved; Delaunay volume fill reached the 300-second limit. Its progress artifact establishes the last native stage, not a completed mesh. |
+
+The OpenFOAM adapter prepares a separate Foundation-12 SST/MRF case at the
+source's 1450 rpm and 90 kg/s. Water properties, the one-native-unit-to-one-metre
+scale, wall adaptation and absolute-pressure datum are explicit **classroom
+assumptions**. They are not verified manufacturer pump conditions. A successful
+iteration-limited native run is recorded separately from a qualified baseline.
+
+The Python research protocol exposes **Input → Equation → Substitution → Result**
+for total-pressure head, suction NPSHA, the adjacent 3% head-drop bracket,
+mesh/time refinement and matched-field restart. It requires actual upstream
+native evidence, coherent source/configuration bindings, conservation and
+convergence checks. Test fixtures and generated dictionaries are not CFD results.
+There is currently no qualified full-pump MRF baseline, cavitation NPSH3, or
+physical sliding-mesh transient result. These dependent stages remain pending
+until their native prerequisites pass.

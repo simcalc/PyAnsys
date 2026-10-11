@@ -56,6 +56,8 @@ def execute(arguments, log_path, workspace, deadline):
                 raise case_tool.CaseIssue(arguments[0] + ' returned exit ' + str(process.returncode))
             # A fast process can exit before the first watchdog iteration.
             workspace_size(workspace)
+            if time.monotonic() >= deadline:
+                raise case_tool.CaseIssue('The native time execution bound was reached at completion.')
         finally:
             if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -84,8 +86,9 @@ def run(mesh_directory, output_directory):
               'preparationReportSha256': sha256((output / 'openfoam-preparation.json').read_bytes()).hexdigest(),
               'limits': {'maximumSeconds': MAX_SECONDS, 'maximumWorkspaceBytes': MAX_WORKSPACE, 'maximumLogBytes': MAX_LOG,
                          'memoryBytes': 2147483648, 'cpus': 1, 'enforcement': 'workflow cgroup plus process/output watchdog'},
-              'stages': [], 'conversionEvidence': [], 'status': 'NATIVE_EXECUTION_REQUIRED',
+              'stages': [], 'conversionEvidence': [], 'physicalWallEvidence': [], 'status': 'NATIVE_EXECUTION_REQUIRED',
               'openFoamConversionVerified': False, 'nativeGeometryQualityVerified': False,
+              'physicalWallTypesVerified': False,
               'coupledInterfaceCoverageVerified': False, 'simulationExecuted': False, 'actualCfdRunVerified': False,
               'qualifiedBaseline': False, 'cavitationSweepExecuted': False, 'npsh3Qualified': False,
               'physicalTransientExecuted': False, 'mainApplicationWrites': False,
@@ -104,6 +107,13 @@ def run(mesh_directory, output_directory):
                 component = 'impeller' if index == 0 else 'volute'
                 report['conversionEvidence'].append(case_tool.verify_conversion(output / (component+'-case'), meshes[component], logs / row['log']))
                 report['openFoamConversionVerified'] = len(report['conversionEvidence']) == 2
+            elif current == 'changeDictionary':
+                component = 'impeller' if index == 1 else 'volute'
+                converter_log = logs / f'{index-1:02d}-gmshToFoam.log'
+                report['physicalWallEvidence'].append(case_tool.verify_conversion(
+                    output / (component+'-case'), meshes[component], converter_log,
+                    after_wall_type_change=True))
+                report['physicalWallTypesVerified'] = len(report['physicalWallEvidence']) == 2
             elif current == 'checkMesh':
                 if 'Mesh OK.' not in text or re.search(r'Failed [1-9][0-9]* mesh checks', text):
                     raise case_tool.CaseIssue('Native mesh geometry/topology checks did not pass.')
@@ -113,19 +123,21 @@ def run(mesh_directory, output_directory):
                 workspace_size(output)
                 if not final.is_dir() or not all((final / name).is_file() for name in ('p', 'U', 'k', 'omega')):
                     raise case_tool.CaseIssue('The fixed steady iteration endpoint needs actual native final fields.')
+                fields = [{'name': name, 'bytes': (final/name).stat().st_size,
+                           'sha256': sha256(case_tool.read_regular(final/name, case_tool.MAX_NATIVE_BYTES)).hexdigest()}
+                          for name in ('p','U','k','omega')]
+                report['finalNativeFields'] = fields
                 report.update(simulationExecuted=True, actualCfdRunVerified=True, status='MRF_EXECUTED_ACCEPTANCE_REQUIRED')
-                report['finalNativeFields'] = [{'name': name, 'bytes': (final/name).stat().st_size,
-                                               'sha256': sha256(case_tool.read_regular(final/name, case_tool.MAX_NATIVE_BYTES)).hexdigest()}
-                                              for name in ('p','U','k','omega')]
         report['workspaceBytes'] = workspace_size(output)
     except Exception as error:
         report.update(status='NATIVE_STAGE_CORRECTION_REQUIRED', reasonCode='CFD_NATIVE_STAGE_CORRECTION_REQUIRED',
+                      actualCfdRunVerified=False,
                       diagnostic={'program': current, 'type': type(error).__name__, 'message': str(error)[:500]})
     report['elapsedSeconds'] = round(time.monotonic()-started, 3)
     (output / 'openfoam-execution.json').write_bytes(inventory.bounded_json(report))
     print(json.dumps({key: report[key] for key in ('status','openFoamConversionVerified','nativeGeometryQualityVerified',
                                                 'actualCfdRunVerified','qualifiedBaseline','mainApplicationWrites')}))
-    return 0 if report['actualCfdRunVerified'] else 2
+    return 0 if report['status'] == 'MRF_EXECUTED_ACCEPTANCE_REQUIRED' and report['actualCfdRunVerified'] else 2
 
 
 def main():
