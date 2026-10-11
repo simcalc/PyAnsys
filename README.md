@@ -63,7 +63,7 @@ SDK version 0.42.2 matches the existing optional CFD adapter's declared pin. Suc
 
 ## Isolation and provenance
 
-Only authored setup, tests and documentation are tracked. Main application source, manufacturer data, study snapshots, database, secrets and credentials are excluded. The separate Frozen Rotor learning release below contains only the official Ansys educational example and meshes. The GitHub publication token exists only in the SDK release step and is not recorded in output. The top-level MIT license covers this repository's authored helpers; original downloaded wheels and educational files retain their upstream notices. Existing published release assets are preserved and rechecked; no claim of GitHub platform-enforced release immutability is made.
+Only authored setup, tests and documentation are tracked. Main application source, manufacturer data, study snapshots, database, secrets and credentials are excluded. The separate Frozen Rotor learning release below contains only the official Ansys educational example and meshes. The GitHub publication token exists only in release publishing steps and is not recorded in output. The top-level MIT license covers this repository's authored helpers; original downloaded wheels and educational files retain their upstream notices. Existing published release assets are preserved and rechecked; no claim of GitHub platform-enforced release immutability is made.
 
 The fixed workflow action commits are official `actions/checkout` v7.0.1 and `actions/setup-python` v7.0.0. Required dependency versions are frozen in each release's `requirements-resolved.txt`, with one SHA-256 per downloaded wheel. A future dependency change requires a separately reviewed release.
 
@@ -76,3 +76,11 @@ Meshes are pinned to official `ansys/example-data` commit `8ef505f6ef699eeec68a1
 This package was prepared without executing the supplied script, launching Fluent or producing a case/result. It is a **steady single-phase MRF example**, not a cavitation pressure sweep, NPSHr qualification or physical transient run. Native licensed Fluent **2025 R2 or later** is required for actual execution. The source's angular unit mapping, material/report constants, absolute pressure datum, mesh/interface and four-process resource setting require explicit native checks before solving. Read `README-learning.txt` and `example-provenance.json` first. These source settings do not override the separate CFD worker limits.
 
 `tools/build_learning_package.py` packages only the exact reviewed official file inventory and refuses checksum mismatches or solver-result claims. It does not import or run tutorial code. The learning bundle is separate from the Linux SDK wheel bundle; neither supplies the proprietary Fluent solver.
+
+## Actual mesh inventory before selecting a FREE solver
+
+Run **Actions → Inspect official Frozen Rotor mesh → Run workflow** to read both pinned official HDF5 meshes on the standard public GitHub runner. A separate reader environment uses `h5py==3.16.0` and `numpy==2.5.4`; it does not install or launch Fluent. The job publishes only a small metadata report and checksum in a new Release, without Actions artifact storage, scheduled execution or a paid runner fallback.
+
+The inspector verifies actual file sizes and SHA-256 before reading topology, surface names and coordinate metadata. It rejects external HDF5 links and preserves the distinction between mesh inventory and native mesh quality. Original tutorial code is treated as data and is never imported or executed.
+
+Compare the **combined impeller plus volute** cell count against the Student edition's current limit. The official [Ansys Student page](https://ansys.synopsys.com/academic/students/ansys-student) lists a fluid limit of one million cells/nodes and a 50 GB disk requirement. That requirement is not a measured installer size, and a model within the cell limit still needs a compatible licensed local solver, RAM budget, mesh/interface checks and numerical acceptance. SDK installation and this inventory do not satisfy those execution gates.

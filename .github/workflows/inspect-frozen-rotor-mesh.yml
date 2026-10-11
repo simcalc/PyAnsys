@@ -1,0 +1,67 @@
+name: Inspect official Frozen Rotor mesh
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-mesh-inspection
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: FREE public runner mesh inventory
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ""
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Check out this independent repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the public standard GitHub runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the separate read-only mesh reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/mesh-reader"
+          "$RUNNER_TEMP/mesh-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/mesh-reader/bin/python" -m pip check
+      - name: Verify reader and isolation contracts
+        run: '"$RUNNER_TEMP/mesh-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Inspect actual checksummed meshes without launching Fluent
+        run: '"$RUNNER_TEMP/mesh-reader/bin/python" -B tools/inspect_frozen_rotor_mesh.py --output "$RUNNER_TEMP/mesh-review/mesh-inspection.json"'
+      - name: Publish the small metadata report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/mesh-review"
+          sha256sum mesh-inspection.json > SHA256SUMS
+          printf '%s\n' 'Actual read-only inventory of the two checksum-verified official Frozen Rotor HDF5 meshes. Counts and coordinate metadata are not native Fluent quality, case generation, convergence, CFD results, cavitation, NPSHr or physical transient validation. No Main data is included. Standard public GitHub runner only; no paid fallback.' > release-notes.txt
+          gh release create "frozen-rotor-mesh-review-${GITHUB_RUN_ID}" mesh-inspection.json SHA256SUMS --repo simcalc/PyAnsys --target "$GITHUB_SHA" --title "Frozen Rotor actual mesh inventory ${GITHUB_RUN_ID}" --notes-file release-notes.txt
+      - name: Verify anonymous report download
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/mesh-review"
+          curl --proto '=https' --proto-redir '=https' --max-time 30 --max-filesize 131072 --retry 3 --retry-delay 3 --fail --silent --show-error --location "https://github.com/simcalc/PyAnsys/releases/download/frozen-rotor-mesh-review-${GITHUB_RUN_ID}/mesh-inspection.json" --output anonymous-mesh-inspection.json
+          cmp mesh-inspection.json anonymous-mesh-inspection.json
+          sha256sum anonymous-mesh-inspection.json
