@@ -1,0 +1,66 @@
+name: Remesh Frozen Rotor educational pump volume
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-volume-remesh
+  cancel-in-progress: false
+
+jobs:
+  volume:
+    name: FREE public runner bounded volume mesh trial
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ""
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public standard runner
+        run: python3 -B tools/public_runner_guard.py
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated geometry runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install --no-install-recommends -y libglu1-mesa
+          python -m venv "$RUNNER_TEMP/volume-reader"
+          "$RUNNER_TEMP/volume-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4 gmsh==4.15.2
+          "$RUNNER_TEMP/volume-reader/bin/python" -m pip check
+      - name: Verify geometry and equation contracts
+        run: '"$RUNNER_TEMP/volume-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Attempt native geometry reparametrization and volume meshing
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -v 2097152
+          timeout --kill-after=10s 300s "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh"
+      - name: Retain only bounded mesh and diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frozen-rotor-remesh-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frozen-rotor-remesh/remesh-report.json
+            ${{ runner.temp }}/frozen-rotor-remesh/impeller.msh
+            ${{ runner.temp }}/frozen-rotor-remesh/volute.msh
+          if-no-files-found: error
+          retention-days: 7
