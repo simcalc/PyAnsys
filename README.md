@@ -384,3 +384,14 @@ complete membership, disjoint-zone, count, hash and immutability checks.
 Re-reading the retained actual bytes completes the diagnostic; it does not
 change the failed native result or accept the 32 unions. Source-cell arithmetic
 and original-to-merged cell equivalence remain distinct evidence checks.
+
+The manual remeshing workflow now also exposes the explicit `delaunay`
+algorithm with `unoptimised` mode. HXT10 remains its default. Delaunay1 uses
+the pinned Gmsh boundary-recovery implementation; it may introduce boundary
+changes, so preservation is measured rather than assumed. Algorithm, mode and
+current progress identity are bound through the owned worker and its reports.
+Any complete volume must pass exact source-boundary identity, positive cells,
+complete tetra face incidence and the unchanged independent native mesh and
+baseline checks. Invalid volume topology is rejected before an interior
+optimiser is invoked. The existing 900-second, one-CPU, 2-GiB meshing and
+sub-million-cell trial budgets remain unchanged.

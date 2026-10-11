@@ -3,6 +3,14 @@ name: Remesh Frozen Rotor educational pump volume
 on:
   workflow_dispatch:
     inputs:
+      algorithm:
+        description: Explicit native 3D algorithm; Delaunay requires unoptimised mode
+        required: true
+        type: choice
+        default: hxt
+        options:
+          - hxt
+          - delaunay
       optimisation_mode:
         description: Full HXT, measured unoptimised candidate, or separate interior optimisation
         required: true
@@ -57,18 +65,24 @@ jobs:
           "$RUNNER_TEMP/volume-reader/bin/python" -m pip check
       - name: Verify geometry and equation contracts
         run: '"$RUNNER_TEMP/volume-reader/bin/python" -B -m unittest discover -s tests -v'
-      - name: Preserve native boundaries and attempt bounded HXT volume fill
+      - name: Preserve native boundaries and attempt the bounded selected volume fill
         env:
           OPTIMISATION_MODE: ${{ inputs.optimisation_mode }}
+          VOLUME_ALGORITHM: ${{ inputs.algorithm }}
         shell: bash
         run: |
           set -euo pipefail
           case "$OPTIMISATION_MODE" in full|unoptimised|gmsh-interior) ;; *) exit 2 ;; esac
+          case "$VOLUME_ALGORITHM" in hxt|delaunay) ;; *) exit 2 ;; esac
+          if [ "$VOLUME_ALGORITHM" = delaunay ] && [ "$OPTIMISATION_MODE" != unoptimised ]; then
+            echo 'Delaunay requires explicit unoptimised mode for this bounded alternate.'
+            exit 2
+          fi
           sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
             systemd-run --scope --unit="frozen-geometry-${GITHUB_RUN_ID}" \
             -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
             /usr/bin/timeout --kill-after=10s 930s \
-            "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh" --optimisation-mode "$OPTIMISATION_MODE"
+            "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py --output-dir "$RUNNER_TEMP/frozen-rotor-remesh" --algorithm "$VOLUME_ALGORITHM" --optimisation-mode "$OPTIMISATION_MODE"
       - name: Install checksum-pinned OpenFOAM Foundation 12
         run: bash tools/install_openfoam12.sh
       - name: Convert and inspect the actual candidate before steady MRF

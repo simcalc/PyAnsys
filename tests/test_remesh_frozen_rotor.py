@@ -98,6 +98,7 @@ class RemeshContracts(unittest.TestCase):
             target = Path(directory)
             (target / 'remesh-progress.json').write_text(json.dumps({
                 'schemaVersion': remesh.SCHEMA, 'stage': 'measured-volume-quality-diagnostics',
+                **remesh.algorithm_metadata(),
                 'component': 'impeller', 'privateExtra': 'excluded',
                 'generatedVolumeDiagnostics': {'exportedVolumeElementCount': 42,
                     'nativeQualityMetrics': {'minSICN': {'minimum': -1e-15, 'negativeCount': 1}}}}))
@@ -116,6 +117,26 @@ class RemeshContracts(unittest.TestCase):
                 path.write_text(raw)
                 with self.assertRaises(remesh.RemeshIssue):
                     remesh.live_progress_summary(target, [])
+
+    def test_live_progress_rejects_a_different_selected_algorithm(self):
+        with TemporaryDirectory() as directory:
+            target=Path(directory)
+            (target/"remesh-progress.json").write_text(json.dumps({"schemaVersion":remesh.SCHEMA,
+                **remesh.algorithm_metadata("hxt")}))
+            with self.assertRaisesRegex(remesh.RemeshIssue,"selected algorithm"):
+                remesh.live_progress_summary(target,[],"delaunay")
+
+    def test_cli_passes_explicit_algorithm_to_the_owned_worker_or_supervisor(self):
+        for native in (False,True):
+            arguments=[str(TOOL),"--output-dir","synthetic-output","--algorithm","delaunay","--optimisation-mode","unoptimised"]
+            if native:arguments.append("--native-worker")
+            with self.subTest(native=native),patch.object(sys,"argv",arguments),\
+                 patch.object(remesh,"run",return_value={"volumeMeshGenerated":False}) as worker,\
+                 patch.object(remesh,"supervised_run",return_value={"volumeMeshGenerated":False}) as supervisor,patch("builtins.print"):
+                self.assertEqual(remesh.main(),2)
+                invoked,other=(worker,supervisor) if native else (supervisor,worker)
+                invoked.assert_called_once_with(Path("synthetic-output"),"unoptimised","delaunay")
+                other.assert_not_called()
 
     def model(self):
         return {"coordinates": POINTS, "zones": [{"zoneId": 11, "name": "wall", "faces": [(1,FACES[0]),(2,FACES[1])]},
@@ -364,6 +385,48 @@ class RemeshContracts(unittest.TestCase):
                 self.assertFalse(target.exists())
                 invoked.assert_not_called()
 
+    def test_delaunay_alternate_changes_only_algorithm_and_retains_fixed_boundary_settings(self):
+        hxt=remesh.volume_mesh_options(1/32,"unoptimised")
+        alternate=remesh.volume_mesh_options(1/32,"unoptimised","delaunay")
+        self.assertEqual(alternate["Mesh.Algorithm3D"],1)
+        self.assertEqual({key:value for key,value in alternate.items() if key!="Mesh.Algorithm3D"},
+                         {key:value for key,value in hxt.items() if key!="Mesh.Algorithm3D"})
+        self.assertEqual(alternate["Mesh.MeshOnlyEmpty"],1)
+        self.assertEqual(alternate["Mesh.Renumber"],0)
+        self.assertEqual(alternate["Mesh.PreserveNumberingMsh2"],1)
+        metadata=remesh.optimisation_metadata("unoptimised","delaunay")
+        self.assertIsNone(metadata["hxtDefaultQualityTarget"])
+        self.assertFalse(metadata["optimisationSuccessVerified"])
+        self.assertFalse(metadata["postFillDefaultOptimisationRequested"])
+        self.assertEqual(remesh.GMSH_ALGORITHM_3D,10)  # No shared constant mutation.
+
+    def test_unknown_algorithms_and_delaunay_optimisation_combinations_reject_before_mutation(self):
+        for algorithm,mode in (("automatic","unoptimised"),(1,"unoptimised"),(None,"full"),
+                               (True,"full"),("Delaunay","unoptimised"),("delaunay","full"),("delaunay","gmsh-interior")):
+            with self.subTest(algorithm=algorithm,mode=mode),TemporaryDirectory() as root:
+                target=Path(root)/"trial"
+                with patch.object(remesh,"enforce_runtime_limits") as limits,patch.object(remesh.subprocess,"Popen") as native:
+                    with self.assertRaises(remesh.RemeshIssue):remesh.run(target,mode,algorithm)
+                    with self.assertRaises(remesh.RemeshIssue):remesh.supervised_run(target,mode,algorithm)
+                self.assertFalse(target.exists());limits.assert_not_called();native.assert_not_called()
+
+    def test_delaunay_runtime_diagnostic_projects_the_selected_algorithm_without_hxt_target_claim(self):
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"alternate"
+            with patch.object(remesh,"enforce_runtime_limits",side_effect=remesh.RemeshIssue("Synthetic preflight")):
+                summary=remesh.run(target,"unoptimised","delaunay")
+            self.assertEqual(summary["gmshAlgorithm3D"],1)
+            for name in ("remesh-report.json","remesh-progress.json"):
+                report=json.loads((target/name).read_bytes())
+                self.assertEqual(report["algorithm"],"delaunay")
+                self.assertEqual(report["gmshAlgorithmName"],"Delaunay")
+                self.assertEqual(report["gmshAlgorithm3D"],1)
+                self.assertIsNone(report["optimisation"]["hxtDefaultQualityTarget"])
+                self.assertFalse(report["actualCfdRunVerified"])
+            report=json.loads((target/"remesh-report.json").read_bytes())
+            self.assertEqual(report["limits"]["maximumCombinedCells"],999999)
+            self.assertEqual(report["limits"]["maximumSeconds"],900)
+
     def test_unoptimised_fill_still_checks_every_cell_and_preserves_native_boundary(self):
         # Inert API adapter with one synthetic tetrahedron; no Gmsh/native run.
         options={}
@@ -385,20 +448,22 @@ class RemeshContracts(unittest.TestCase):
                 getEntities=lambda dim:[(2,11),(2,12)],addPhysicalGroup=lambda *args:None,setPhysicalName=lambda *args:None,
                 geo=SimpleNamespace(addSurfaceLoop=lambda *args:1,addVolume=lambda *args:1,synchronize=lambda:None)))
         model=self.model();model["nativeCounts"]={"cellCount":2,"nodeCount":4}
-        progress={"optimisationMode":"unoptimised"}
-        with TemporaryDirectory() as root,patch.object(remesh,"checkpoint") as checkpoint:
-            with self.assertRaisesRegex(remesh.RemeshIssue,"Every generated cell"):
-                remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
-            self.assertEqual(options,remesh.volume_mesh_options(1/32,"unoptimised"))
-            self.assertEqual(mesh.generated,3)
-            self.assertIn("quality-and-preserved-boundary-equality",[call.args[1] for call in checkpoint.call_args_list])
-            self.assertFalse((Path(root)/"impeller.msh").exists())
-            measured=progress["generatedVolumeDiagnostics"]
-            self.assertEqual(measured["exportedVolumeElementCount"],1)
-            self.assertEqual(measured["tetraCoordinateAndDeterminant"]["signedDeterminant"]["minimum"],1)
-            self.assertEqual(measured["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
-            self.assertFalse(measured["qualityAndBoundaryGatesPassed"])
-            self.assertIn("measured-volume-quality-diagnostics",[call.args[1] for call in checkpoint.call_args_list])
+        for algorithm in ("hxt","delaunay"):
+            progress={"optimisationMode":"unoptimised","algorithm":algorithm}
+            with self.subTest(algorithm=algorithm),TemporaryDirectory() as root,patch.object(remesh,"checkpoint") as checkpoint:
+                with self.assertRaisesRegex(remesh.RemeshIssue,"Every generated cell"):
+                    remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+                self.assertEqual(options,remesh.volume_mesh_options(1/32,"unoptimised",algorithm))
+                self.assertEqual(mesh.generated,3)
+                self.assertIn("quality-and-preserved-boundary-equality",[call.args[1] for call in checkpoint.call_args_list])
+                self.assertFalse((Path(root)/"impeller.msh").exists())
+                measured=progress["generatedVolumeDiagnostics"]
+                self.assertEqual(measured["algorithm"],algorithm)
+                self.assertEqual(measured["exportedVolumeElementCount"],1)
+                self.assertEqual(measured["tetraCoordinateAndDeterminant"]["signedDeterminant"]["minimum"],1)
+                self.assertEqual(measured["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
+                self.assertFalse(measured["qualityAndBoundaryGatesPassed"])
+                self.assertIn("measured-volume-quality-diagnostics",[call.args[1] for call in checkpoint.call_args_list])
 
     def interior_fixture(self, mutation=None, invalid_final_quality=False):
         """Inert fake native adapter: these tetrahedra are unit fixtures only."""
@@ -517,11 +582,30 @@ class RemeshContracts(unittest.TestCase):
         self.assertEqual(evidence["after"]["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],4)
         self.assertFalse(evidence["qualityAccepted"])
 
+    def test_interior_optimisation_rejects_invalid_volume_face_incidence_before_native_execution(self):
+        gmsh,model,_=self.interior_fixture()
+        mesh=gmsh.model.mesh
+        original=mesh.getElements
+        def duplicate_volume(dimension,entity):
+            if dimension==3 and not mesh.optimised:
+                return [4],[[100,101]],[[1,2,3,4,1,2,3,4]]
+            return original(dimension,entity)
+        mesh.getElements=duplicate_volume
+        progress={"optimisationMode":"gmsh-interior"}
+        with TemporaryDirectory() as root,patch.object(remesh,"checkpoint"):
+            with self.assertRaisesRegex(remesh.RemeshIssue,"valid tetra face incidence"):
+                remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+        self.assertEqual(mesh.calls,[])
+        self.assertFalse(progress["preOptimisationFaceIncidence"]["accepted"])
+        self.assertEqual(progress["preOptimisationFaceIncidence"]["duplicateTetraCount"],1)
+
     def test_interrupted_native_worker_report_removes_partial_mesh_and_never_claims_cfd(self):
         with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
             target=Path(root)/"trial"
             target.mkdir()
-            remesh.persist_json(target,"remesh-progress.json",{"stage":"fixed-boundary-tetrahedral-fill","component":"impeller", "verifiedSources":[],"journal":[]})
+            remesh.persist_json(target,"remesh-progress.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),
+                "optimisation":remesh.optimisation_metadata("full"),"stage":"fixed-boundary-tetrahedral-fill",
+                "component":"impeller", "verifiedSources":[],"journal":[]})
             (target/"impeller.msh").write_bytes(b"Interrupted native output")
             report=remesh.interrupted_report(target,"CFD_CLASSROOM_MESH_WORKER_TIMEOUT",["Native geometry recovery"],300,-15)
             self.assertEqual(report["diagnostic"]["stage"],"fixed-boundary-tetrahedral-fill")
@@ -530,6 +614,37 @@ class RemeshContracts(unittest.TestCase):
             self.assertFalse(report["originalMeshesImmutable"])
             self.assertFalse((target/"impeller.msh").exists())
             self.assertEqual(report["files"],[])
+
+    def test_interrupted_recovery_rejects_mismatched_missing_or_invalid_identity_before_consuming_facts(self):
+        valid={"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata("delaunay"),
+            "optimisation":remesh.optimisation_metadata("unoptimised","delaunay"),"stage":"candidate-fill",
+            "verifiedSources":[],"journal":[]}
+        mismatches=[{**valid,**remesh.algorithm_metadata("hxt")},
+            {key:value for key,value in valid.items() if key!="algorithm"},
+            {key:value for key,value in valid.items() if key!="gmshAlgorithm3D"},
+            {key:value for key,value in valid.items() if key!="gmshAlgorithmName"},
+            {**valid,"gmshAlgorithm3D":True},{**valid,"gmshAlgorithmName":"HXT"},
+            {**valid,"schemaVersion":"old-schema"},
+            {key:value for key,value in valid.items() if key!="schemaVersion"},
+            {**valid,"optimisation":remesh.optimisation_metadata("full")},[]]
+        for progress in mismatches:
+            with self.subTest(progress=progress),TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+                target=Path(root)/"trial";target.mkdir()
+                remesh.persist_json(target,"remesh-progress.json",progress)
+                partial=target/"impeller.msh";partial.write_bytes(b"untouched foreign-attempt fixture")
+                with patch.object(remesh.inventory,"verify_file") as inspect:
+                    with self.assertRaises(remesh.RemeshIssue):
+                        remesh.interrupted_report(target,"WORKER_TIMEOUT",[],900,-15,"unoptimised","delaunay")
+                    inspect.assert_not_called()
+                self.assertFalse((target/"remesh-report.json").exists())
+                self.assertEqual(partial.read_bytes(),b"untouched foreign-attempt fixture")
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            target=Path(root)/"trial";target.mkdir()
+            remesh.persist_json(target,"remesh-progress.json",valid)
+            report=remesh.interrupted_report(target,"WORKER_TIMEOUT",[],900,-15,"unoptimised","delaunay")
+            self.assertEqual(report["algorithm"],"delaunay")
+            self.assertEqual(report["diagnostic"]["stage"],"candidate-fill")
+            self.assertFalse(report["volumeMeshGenerated"])
 
     def test_process_group_stop_targets_only_the_owned_fresh_worker_session(self):
         class Process:
@@ -566,7 +681,7 @@ class RemeshContracts(unittest.TestCase):
             target=Path(root)/"trial"
             def launched(*arguments,**options):
                 target.mkdir()
-                remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"PREPARATION_REQUIRED",
+                remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),"status":"PREPARATION_REQUIRED",
                     "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,"files":[],"meshes":[],
                     "optimisation":remesh.optimisation_metadata("full")})
                 return Process()
@@ -608,8 +723,8 @@ class RemeshContracts(unittest.TestCase):
             target=Path(root)/"trial"
             def launched(*arguments,**options):
                 target.mkdir()
-                remesh.persist_json(target,"remesh-progress.json",{"schemaVersion":remesh.SCHEMA,"stage":"fixed-boundary-tetrahedral-fill","component":"impeller",
-                    "verifiedSources":verified,"journal":[],"surfaceZoneBindings":[]})
+                remesh.persist_json(target,"remesh-progress.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),"stage":"fixed-boundary-tetrahedral-fill","component":"impeller",
+                    "optimisation":remesh.optimisation_metadata("full"),"verifiedSources":verified,"journal":[],"surfaceZoneBindings":[]})
                 (target/"impeller.msh").write_bytes(b"Incomplete native output")
                 return process
             def stopped(owned):
@@ -657,7 +772,7 @@ class RemeshContracts(unittest.TestCase):
                 target=Path(root)/"unoptimised-trial"
                 def launched(*arguments,**options):
                     target.mkdir()
-                    remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"PREPARATION_REQUIRED",
+                    remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),"status":"PREPARATION_REQUIRED",
                         "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,
                         "files":[],"meshes":[],"optimisation":remesh.optimisation_metadata(worker_mode)})
                     return Process()
@@ -674,6 +789,49 @@ class RemeshContracts(unittest.TestCase):
                 retained=json.loads((target/"gmsh-native-tail.json").read_text())
                 self.assertEqual(retained["optimisation"]["mode"],"unoptimised")
                 self.assertFalse(retained["optimisation"]["optimisationSuccessVerified"])
+
+    def test_supervisor_binds_explicit_delaunay_selection_and_rejects_different_worker_algorithm(self):
+        # Inert child mocks only: no native Gmsh/solver execution or mesh claim.
+        class Stream:
+            def fileno(self):return 123
+            def close(self):pass
+        class Process:
+            stdout=Stream()
+            def poll(self):return 2
+            def wait(self,timeout):return 2
+        class Selector:
+            active=True
+            def register(self,file,event):self.file=file
+            def get_map(self):return {1:True} if self.active else {}
+            def select(self,timeout):return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file):self.active=False
+            def close(self):pass
+        for worker_algorithm in ("delaunay","hxt","missing"):
+            with self.subTest(worker_algorithm=worker_algorithm),TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+                target=Path(root)/"alternate"
+                def launched(*arguments,**options):
+                    target.mkdir()
+                    selector={} if worker_algorithm=="missing" else remesh.algorithm_metadata(worker_algorithm)
+                    remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,**selector,
+                        "status":"PREPARATION_REQUIRED","volumeMeshGenerated":False,"actualCfdRunVerified":False,
+                        "simulationExecuted":False,"mainApplicationWrites":False,"files":[],"meshes":[],
+                        # Same declared mode: the algorithm gate must independently reject mismatches.
+                        "optimisation":remesh.optimisation_metadata("unoptimised","delaunay")})
+                    return Process()
+                with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched) as launch,\
+                     patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",return_value=b""),patch("builtins.print"):
+                    if worker_algorithm=="delaunay":
+                        summary=remesh.supervised_run(target,"unoptimised","delaunay")
+                        self.assertEqual(summary["gmshAlgorithm3D"],1)
+                        self.assertFalse(summary["volumeMeshGenerated"])
+                    else:
+                        with self.assertRaisesRegex(remesh.RemeshIssue,"claim contract"):
+                            remesh.supervised_run(target,"unoptimised","delaunay")
+                command=launch.call_args.args[0]
+                self.assertEqual(command[command.index("--algorithm")+1],"delaunay")
+                retained=json.loads((target/"gmsh-native-tail.json").read_bytes())
+                self.assertEqual(retained["gmshAlgorithmName"],"Delaunay")
+                self.assertIsNone(retained["optimisation"]["hxtDefaultQualityTarget"])
 
     def test_supervisor_rejects_completed_worker_evidence_past_wall_clock_deadline(self):
         class Stream:
