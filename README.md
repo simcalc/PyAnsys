@@ -464,3 +464,43 @@ Those fields still require valid UTC time, run/attempt/commit provenance and the
 reviewed h5py/HDF5 pair. Every current raw report byte is copied and hash-bound,
 and all eleven STL byte pins remain unchanged. The extraction scope now also
 forwards its actual GitHub run provenance rather than publishing null fields.
+
+Actual corrected run [38172742283](https://github.com/simcalc/PyAnsys/actions/runs/38172742283)
+passed **500 contract tests** and both actual native surface checks in **8.15
+seconds**. The impeller retained 253,728 triangles and the volute 42,332.
+Both logs reported zero illegal triangles, zero non-manifold/open edges and
+zero self-intersection locations, with one consistently oriented connected
+boundary shell each. This establishes the stated native surface-check scope;
+it does not establish a generated volume or physical pump performance.
+
+Actual original run [38172359888](https://github.com/simcalc/PyAnsys/actions/runs/38172359888)
+also verified complete source/native correspondence. All **11,310 failed cell
+IDs** matched, with every current oriented polygon, exact coordinate class and
+original owner/neighbour binding checked. Original native quality still fails,
+so that run correctly remains red and never invokes `foamRun`.
+
+### Explicit approximate snappyHexMesh volume pilot
+
+The separate manual `Frozen Rotor approximate snappyHexMesh volume pilot`
+workflow starts from freshly bound tagged surfaces and actual surface checks
+on the same commit. It authors an approximately isotropic padded background
+box, source-derived interior seeds verified by three nondegenerate rays,
+feature extraction, castellated refinement and snapping. Boundary layers are
+disabled for this initial geometry pilot; wall resolution and convergence
+remain unqualified. One source coordinate unit equals one metre by declared
+classroom assumption only. Original volume meshes remain unchanged.
+
+Each component has a 450,000-cell generation/admission cap; the measured
+combined mesh must contain **fewer than 1,000,000 cells**. The serial native
+budget is **900 seconds, one CPU, 4 GiB memory and 1 GiB workspace**. All eleven
+original patch names/types, complete rotating/stationary cell zones, positive
+geometry, full `checkMesh -allGeometry -allTopology -writeSets`, and unchanged
+native interface coverage are required. Pre-merge raw meshes are retained as
+immutable snapshots. Native patch area, bounds and enclosed-volume comparisons
+are measured independently and labelled as approximation diagnostics.
+
+This pilot invokes geometry utilities only. It does not invoke `foamRun` or
+admit geometry accuracy, a steady MRF solution, pressure-sweep NPSHr, physical
+transient, wall resolution, mesh/time convergence or actual restart. A native
+mesh success and those subsequent engineering acceptance stages remain
+separate results.

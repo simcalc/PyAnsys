@@ -100,5 +100,7 @@ jobs:
             ${{ runner.temp }}/frozen-surface-unions/**
             ${{ runner.temp }}/frozen-surface-native/*.json
             ${{ runner.temp }}/frozen-surface-native/logs/*.log
+            ${{ runner.temp }}/frozen-surface-native/components/impeller/impeller-union.obj
+            ${{ runner.temp }}/frozen-surface-native/components/volute/volute-union.obj
           if-no-files-found: error
           retention-days: 1
