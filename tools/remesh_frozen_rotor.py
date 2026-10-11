@@ -75,6 +75,9 @@ def volume_mesh_options(size, mode="full"):
             "Mesh.MeshSizeFromCurvature": 0, "Mesh.MeshSizeExtendFromBoundary": 0,
             "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": GMSH_ALGORITHM_3D, "Mesh.ElementOrder": 1,
             "Mesh.MshFileVersion": 2.2, "Mesh.Binary": 0, "Mesh.SaveAll": 0,
+            # Native global node IDs are part of the exact boundary contract.
+            # The default renumbers both nodes and elements after generate(3).
+            "Mesh.Renumber": 0,
             "Mesh.Optimize": optimisation["meshOptimize"]}
 
 

@@ -244,6 +244,7 @@ class RemeshContracts(unittest.TestCase):
         full=remesh.volume_mesh_options(1/32)
         unoptimised=remesh.volume_mesh_options(1/32,"unoptimised")
         self.assertEqual(full["Mesh.Optimize"],1)
+        self.assertEqual(full["Mesh.Renumber"],0)
         self.assertEqual(unoptimised["Mesh.Optimize"],0)
         self.assertEqual({key:value for key,value in full.items() if key!="Mesh.Optimize"},
                          {key:value for key,value in unoptimised.items() if key!="Mesh.Optimize"})

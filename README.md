@@ -226,3 +226,14 @@ and paired native restart verification remain separate acceptance checks.
 Neither prepared dictionaries nor parser tests establish that these native
 simulations have run. There is still no accepted full-pump volume mesh from
 the trials above, so this dependent workflow has not been dispatched.
+### Exact boundary IDs after volume generation
+
+Actual run [38164389147](https://github.com/simcalc/PyAnsys/actions/runs/38164389147)
+stopped at the complete boundary identity gate **before** the requested interior
+optimiser executed. Its exported impeller volume contained 489,656 tetrahedra;
+this is a rejected candidate, not an accepted mesh. Gmsh's documented default
+`Mesh.Renumber=1` renumbers nodes and elements after generation. The next trial
+sets `Mesh.Renumber=0` to retain original global node IDs. Exact coordinate,
+triangle, winding, source-zone and every-cell quality checks remain mandatory.
+This setting is an attempted correction, not proof that the next mesh passes.
+
