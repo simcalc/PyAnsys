@@ -36,8 +36,9 @@ MAX_COMBINED_CELLS = 999_999
 MAX_COMBINED_NODES = 999_999
 MAX_CLASSIFIED_SURFACES = 512
 GMSH_ALGORITHM_3D = 10  # HXT: efficient Delaunay implementation; exact facets stay fixed.
-OPTIMISATION_MODES = ("full", "unoptimised")
+OPTIMISATION_MODES = ("full", "unoptimised", "gmsh-interior")
 HXT_DEFAULT_QUALITY_TARGET = .3  # Native HXT optimisation target, not measured minSICN.
+VOLUME_CLOSURE_RELATIVE_TOLERANCE = 1e-8
 NATIVE_TAIL_LINES = 24
 NATIVE_LINE_CHARACTERS = 240
 CHILD_ENVIRONMENT_KEYS = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "RUNNER_OS",
@@ -56,11 +57,15 @@ class RemeshIssue(inventory.InspectionIssue):
 
 def optimisation_metadata(mode):
     if mode not in OPTIMISATION_MODES:
-        raise RemeshIssue("Choose explicit HXT optimisation mode full or unoptimised.")
+        raise RemeshIssue("Choose explicit optimisation mode full, unoptimised or gmsh-interior.")
     return {"mode": mode, "meshOptimize": int(mode == "full"),
             "hxtDefaultQualityTarget": HXT_DEFAULT_QUALITY_TARGET,
             "targetBasis": "Pinned Gmsh 4.15.2 native HXT optimisation default; no target override.",
             "targetIsMeasuredMinSICN": False, "optimisationSuccessVerified": False,
+            "postFillDefaultOptimisationRequested": mode == "gmsh-interior",
+            "postFillDefaultOptimisationThreshold": .3 if mode == "gmsh-interior" else None,
+            "postFillDefaultOptimisationMetric": "Native gamma quality, not minSICN" if mode == "gmsh-interior" else None,
+            "postFillTargetOverride": False, "postFillIterationBoundClaimed": False,
             "claimBoundary": "Requested native optimisation setting only. Actual every-cell quality and independent OpenFOAM checkMesh acceptance remain separate."}
 
 
@@ -180,6 +185,7 @@ def checkpoint(progress, stage):
              "verifiedSources": progress.get("verifiedSources", []), "gmshAlgorithm3D": GMSH_ALGORITHM_3D,
              "optimisation": optimisation_metadata(progress.get("optimisationMode", "full")),
              "generatedVolumeDiagnostics": progress.get("generatedVolumeDiagnostics"),
+             "interiorOptimisationDiagnostics": progress.get("interiorOptimisationDiagnostics"),
              "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
     persist_json(progress["destination"], "remesh-progress.json", value)
 
@@ -188,6 +194,8 @@ def gmsh_diagnostic(gmsh, progress):
     result = {"surfaceZoneBindings": progress.get("surfaceZoneBindings", []), "lastEntityErrors": [], "loggerTail": []}
     if progress.get("generatedVolumeDiagnostics") is not None:
         result["generatedVolumeDiagnostics"] = progress["generatedVolumeDiagnostics"]
+    if progress.get("interiorOptimisationDiagnostics") is not None:
+        result["interiorOptimisationDiagnostics"] = progress["interiorOptimisationDiagnostics"]
     if gmsh is not None and gmsh.isInitialized():
         try:
             result["lastEntityErrors"] = [[int(dim), int(tag)] for dim, tag in gmsh.model.mesh.getLastEntityError()[:16]]
@@ -334,6 +342,32 @@ def tetra_metrics(cells, points):
             "everyTetrahedronChecked": True}
 
 
+def volume_closure(zones, native_points, tetra_volume):
+    """Compare exact native fan geometry with the positive generated volume sum."""
+    box = bounds(list(native_points.values()))
+    reference = tuple((low+high)/2 for low, high in zip(box["minimum"], box["maximum"]))
+    terms = []
+    for zone in zones:
+        for triangle in zone["triangles"]:
+            a, b, c = [boundary._sub(native_points[node], reference) for node in triangle]
+            terms.append(boundary._dot(a, boundary._cross(b, c))/6)
+    signed = math.fsum(terms)
+    if not math.isfinite(signed) or signed == 0 or not math.isfinite(tetra_volume) or tetra_volume <= 0:
+        raise RemeshIssue("Volume closure requires finite nonzero native signed volume and positive tetrahedral volume.")
+    magnitude = abs(signed)
+    difference, tolerance = abs(tetra_volume-magnitude), magnitude*VOLUME_CLOSURE_RELATIVE_TOLERANCE
+    result = {"nativeSignedFanVolumeNativeUnitsCubed": signed, "nativeFanVolumeMagnitudeNativeUnitsCubed": magnitude,
+              "generatedPositiveTetraVolumeNativeUnitsCubed": tetra_volume,
+              "absoluteDifferenceNativeUnitsCubed": difference, "relativeDifference": difference/magnitude,
+              "relativeTolerance": VOLUME_CLOSURE_RELATIVE_TOLERANCE,
+              "absoluteToleranceNativeUnitsCubed": tolerance, "toleranceScale": "Absolute signed exact float64 closed native fan volume",
+              "referencePointNativeUnits": list(reference), "nativeWindingChanged": False,
+              "equation": "Vboundary = abs(sum(dot(a-r,cross(b-r,c-r))/6)); |VtetraSum-Vboundary| <= 1e-8*Vboundary",
+              "passed": difference <= tolerance,
+              "claimBoundary": "Closed-boundary volume consistency only; no CFD accuracy or self-intersection acceptance claim."}
+    return result
+
+
 def nearest_triangle_distance(point, triangles, np):
     """Exact point-to-triangle distance over all same-zone native triangles."""
     best = math.inf
@@ -406,12 +440,44 @@ def _quality(gmsh, cell_tags):
     return result
 
 
+def inspect_exported_volume(gmsh, volume, name, progress):
+    node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
+    if not 4 <= len(node_tags) <= MAX_NEW_NODES_PER_COMPONENT or len(coordinates) != 3*len(node_tags):
+        raise RemeshIssue("Generated node count exceeds the fixed classroom budget or has an invalid coordinate shape.")
+    points = {int(tag): tuple(float(value) for value in coordinates[i*3:i*3+3]) for i, tag in enumerate(node_tags)}
+    if len(points) != len(node_tags):
+        raise RemeshIssue("Generated nodes must retain unique global node IDs.")
+    types, tag_sets, node_sets = gmsh.model.mesh.getElements(3, volume)
+    progress["generatedVolumeDiagnostics"] = {
+        "sourceMesh": name, "exportedNodeTagCount": len(node_tags), "uniqueExportedNodeCount": len(points),
+        "exportedVolumeElementTypes": [int(kind) for kind in types[:8]],
+        "exportedVolumeElementCount": sum(len(tags) for tags in tag_sets),
+        "exportedVolumeConnectivityEntryCount": sum(len(nodes) for nodes in node_sets),
+        "countBasis": "Actual Gmsh getElements(3, volume) exported elements; native HXT internal counters and all-dimensional log summaries are different quantities.",
+        "qualityAndBoundaryGatesPassed": False}
+    checkpoint(progress, "exported-volume-count-diagnostics")
+    if len(types) != 1 or int(types[0]) != 4 or len(node_sets[0]) != 4*len(tag_sets[0]):
+        raise RemeshIssue("A nonempty linear tetrahedral volume mesh is required.")
+    if not 1 <= len(tag_sets[0]) <= MAX_NEW_CELLS_PER_COMPONENT:
+        raise RemeshIssue("The tetra-fill exceeds the fixed per-component cell budget.")
+    tags = [int(tag) for tag in tag_sets[0]]
+    cells = [tuple(int(node) for node in node_sets[0][i:i+4]) for i in range(0, len(node_sets[0]), 4)]
+    progress["generatedVolumeDiagnostics"]["tetraCoordinateAndDeterminant"] = tetra_coordinate_diagnostics(cells, points)
+    progress["generatedVolumeDiagnostics"]["nativeQualityMetrics"] = measured_quality_diagnostics(gmsh, tags)
+    interior = progress.get("interiorOptimisationDiagnostics")
+    if interior is not None and interior["nativeOptimisationReturned"]:
+        interior["after"] = progress["generatedVolumeDiagnostics"]
+    checkpoint(progress, "measured-volume-quality-diagnostics")
+    return points, tags, cells
+
+
 def remesh_component(model, name, destination, gmsh, np, progress):
     optimisation = optimisation_metadata(progress.get("optimisationMode", "full"))
     component = name.split(".")[0]
     progress["component"] = component
     progress["surfaceZoneBindings"] = []
     progress.pop("generatedVolumeDiagnostics", None)
+    progress.pop("interiorOptimisationDiagnostics", None)
     checkpoint(progress, "native-boundary-validation")
     zones, owners, native_audit = source_triangles(model)
     used = sorted({node for triangle in owners for node in triangle})
@@ -453,35 +519,44 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         gmsh.option.setNumber(option, value)
     checkpoint(progress, "fixed-boundary-tetrahedral-fill")
     gmsh.model.mesh.generate(3)
-    node_tags, coordinates, _ = gmsh.model.mesh.getNodes()
-    if not 4 <= len(node_tags) <= MAX_NEW_NODES_PER_COMPONENT or len(coordinates) != 3*len(node_tags):
-        raise RemeshIssue("Generated node count exceeds the fixed classroom budget or has an invalid coordinate shape.")
-    points = {int(tag): tuple(float(value) for value in coordinates[i*3:i*3+3]) for i, tag in enumerate(node_tags)}
-    types, tag_sets, node_sets = gmsh.model.mesh.getElements(3, volume)
-    progress["generatedVolumeDiagnostics"] = {
-        "sourceMesh": name, "exportedNodeTagCount": len(node_tags), "uniqueExportedNodeCount": len(points),
-        "exportedVolumeElementTypes": [int(kind) for kind in types[:8]],
-        "exportedVolumeElementCount": sum(len(tags) for tags in tag_sets),
-        "exportedVolumeConnectivityEntryCount": sum(len(nodes) for nodes in node_sets),
-        "countBasis": "Actual Gmsh getElements(3, volume) exported elements; native HXT internal counters and all-dimensional log summaries are different quantities.",
-        "qualityAndBoundaryGatesPassed": False}
-    checkpoint(progress, "exported-volume-count-diagnostics")
-    if len(types) != 1 or int(types[0]) != 4 or len(node_sets[0]) != 4*len(tag_sets[0]):
-        raise RemeshIssue("A nonempty linear tetrahedral volume mesh is required.")
-    if not 1 <= len(tag_sets[0]) <= MAX_NEW_CELLS_PER_COMPONENT:
-        raise RemeshIssue("The tetra-fill exceeds the fixed per-component cell budget.")
-    tags = [int(tag) for tag in tag_sets[0]]
-    cells = [tuple(int(node) for node in node_sets[0][i:i+4]) for i in range(0, len(node_sets[0]), 4)]
-    progress["generatedVolumeDiagnostics"]["tetraCoordinateAndDeterminant"] = tetra_coordinate_diagnostics(cells, points)
-    progress["generatedVolumeDiagnostics"]["nativeQualityMetrics"] = measured_quality_diagnostics(gmsh, tags)
-    checkpoint(progress, "measured-volume-quality-diagnostics")
+    points, tags, cells = inspect_exported_volume(gmsh, volume, name, progress)
+    if optimisation["mode"] == "gmsh-interior":
+        before_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
+        before_groups, before_audit = preserved_boundary(before_surfaces, owners, originals, native_points, points)
+        if before_groups != groups:
+            raise RemeshIssue("Interior optimisation requires the same complete native source-zone surface entities before execution.")
+        evidence = {"nativeMethod": "gmsh.model.mesh.optimize('', force=True)", "iterationBoundClaimed": False,
+                    "externalMaximumSeconds": MAX_SECONDS, "nativeGammaThreshold": .3, "targetOverride": False,
+                    "before": progress["generatedVolumeDiagnostics"], "after": None,
+                    "completeNativeBoundaryBeforeVerified": True, "completeNativeBoundaryAfterVerified": False,
+                    "boundaryBeforeAudit": before_audit, "nativeOptimisationReturned": False,
+                    "qualityAccepted": False, "claimBoundary": "Native interior optimisation under the unchanged external watchdog; full source boundary equality and every-cell quality remain mandatory."}
+        progress["interiorOptimisationDiagnostics"] = evidence
+        checkpoint(progress, "native-default-interior-optimisation")
+        gmsh.model.mesh.optimize("", force=True)  # Native default ignores niter; the external watchdog owns the bound.
+        evidence["nativeOptimisationReturned"] = True
+        del points, tags, cells  # Retain bounded summaries, not both pre/post cell arrays.
+        points, tags, cells = inspect_exported_volume(gmsh, volume, name, progress)
+        evidence["after"] = progress["generatedVolumeDiagnostics"]
+        after_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
+        after_groups, after_audit = preserved_boundary(after_surfaces, owners, originals, native_points, points)
+        if after_groups != groups:
+            raise RemeshIssue("Interior optimisation must retain every exact native source-zone surface entity.")
+        evidence.update(completeNativeBoundaryAfterVerified=True, boundaryAfterAudit=after_audit)
     checkpoint(progress, "quality-and-preserved-boundary-equality")
     metrics, quality = tetra_metrics(cells, points), _quality(gmsh, tags)
     final_surfaces = {tag: _triangles_for_surface(gmsh, tag) for dim, tag in gmsh.model.getEntities(2)}
     final_groups, final_boundary_audit = preserved_boundary(final_surfaces, owners, originals, native_points, points)
     if final_groups != groups:
         raise RemeshIssue("Volume fill must retain the same exact source-zone surface entities.")
+    closure = volume_closure(zones, native_points, metrics["totalTetraVolumeAssumedM3"])
+    progress["generatedVolumeDiagnostics"]["nativeBoundaryVolumeClosure"] = closure
+    if not closure["passed"]:
+        checkpoint(progress, "native-boundary-volume-closure-rejected")
+        raise RemeshIssue("The positive tetrahedral volume sum must match the exact closed native fan volume within the declared relative tolerance.")
     progress["generatedVolumeDiagnostics"]["qualityAndBoundaryGatesPassed"] = True
+    if optimisation["mode"] == "gmsh-interior":
+        progress["interiorOptimisationDiagnostics"]["qualityAccepted"] = True
     if len(cells) >= model["nativeCounts"]["cellCount"]:
         raise RemeshIssue("The classroom candidate must contain fewer volume cells than its native source component.")
     boundary_rows = []
@@ -518,8 +593,9 @@ def remesh_component(model, name, destination, gmsh, np, progress):
               "fixedNativeFanBoundaryAudit": fixed_audit, "finalPreservedBoundaryAudit": final_boundary_audit,
               "boundaryRemeshed": False, "surfaceReparametrizationPerformed": False,
               "sourceBoundaryBoundsAssumedM": native_box, "generatedBoundsAssumedM": bounds(list(points.values())),
-              "cellMetrics": metrics, "gmshQuality": quality, "boundaryZones": boundary_rows,
+              "cellMetrics": metrics, "nativeBoundaryVolumeClosure": closure, "gmshQuality": quality, "boundaryZones": boundary_rows,
               "optimisation": optimisation,
+              "interiorOptimisationDiagnostics": progress.get("interiorOptimisationDiagnostics"),
               "volumePhysicalGroup": "rotating-fluid" if component == "impeller" else "stationary-fluid",
               "equationStages": [{"input": {"sourceBoundaryBoundsNative": native_box, "sizingDivisor": SIZING_DIVISOR, "assumedMetresPerNativeUnit": 1},
                   "equation": "h_trial = max(xmax-xmin, ymax-ymin, zmax-zmin) / 32",
@@ -715,6 +791,7 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
         "diagnostic":{"stage":progress.get("stage","worker-startup"),"component":progress.get("component"),
             "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[]),
             "generatedVolumeDiagnostics":progress.get("generatedVolumeDiagnostics")},
+        "interiorOptimisationDiagnostics":progress.get("interiorOptimisationDiagnostics"),
         "progressJournal":progress.get("journal",[]),"sources":sources,"postAttemptSourceVerification":checks,
         "originalMeshesImmutable":all(row["immutableVerified"] for row in checks),"elapsedSeconds":round(elapsed,3),
         "limits":{"threads":1,"maximumSeconds":MAX_SECONDS,"maximumAddressSpaceBytes":MAX_MEMORY_BYTES,"maximumOutputBytes":MAX_OUTPUT_BYTES},

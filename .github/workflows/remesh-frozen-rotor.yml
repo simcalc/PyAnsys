@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       optimisation_mode:
-        description: Full HXT optimisation, or a separately checked unoptimised candidate
+        description: Full HXT, measured unoptimised candidate, or separate interior optimisation
         required: true
         type: choice
         default: full
         options:
           - full
           - unoptimised
+          - gmsh-interior
 
 permissions:
   contents: read
@@ -62,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "$OPTIMISATION_MODE" in full|unoptimised) ;; *) exit 2 ;; esac
+          case "$OPTIMISATION_MODE" in full|unoptimised|gmsh-interior) ;; *) exit 2 ;; esac
           sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_EVENT_NAME,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
             systemd-run --scope --unit="frozen-geometry-${GITHUB_RUN_ID}" \
             -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
@@ -113,4 +114,4 @@ jobs:
             ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.json
             ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1

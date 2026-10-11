@@ -84,6 +84,23 @@ class RemeshContracts(unittest.TestCase):
             with self.subTest(cells=cells), self.assertRaises(remesh.RemeshIssue):
                 remesh.tetra_metrics(cells,POINTS)
 
+    def test_native_fan_volume_closure_retains_signed_source_and_explicit_tolerance(self):
+        zones,_,_=remesh.source_triangles(self.model())
+        for winding in (zones,[{**row,"triangles":[tuple(reversed(triangle)) for triangle in row["triangles"]]} for row in zones]):
+            measured=remesh.volume_closure(winding,POINTS,1/6)
+            self.assertTrue(measured["passed"])
+            self.assertEqual(measured["relativeTolerance"],1e-8)
+            self.assertFalse(measured["nativeWindingChanged"])
+            self.assertEqual(abs(measured["nativeSignedFanVolumeNativeUnitsCubed"]),1/6)
+        self.assertLess(remesh.volume_closure(winding,POINTS,1/6)["nativeSignedFanVolumeNativeUnitsCubed"],0)
+        mismatch=remesh.volume_closure(zones,POINTS,1/3)
+        self.assertFalse(mismatch["passed"])
+        self.assertEqual(mismatch["relativeDifference"],1)
+        self.assertEqual(mismatch["absoluteToleranceNativeUnitsCubed"],(1/6)*1e-8)
+        for invalid in (0,math.nan,math.inf,-1):
+            with self.subTest(invalid=invalid),self.assertRaises(remesh.RemeshIssue):
+                remesh.volume_closure(zones,POINTS,invalid)
+
     def test_patch_area_vector_and_bounds_keep_unverified_normal_convention(self):
         metrics=remesh.patch_metrics([FACES[0]],POINTS)
         self.assertEqual(metrics["areaAssumedM2"],0.5)
@@ -237,6 +254,13 @@ class RemeshContracts(unittest.TestCase):
             self.assertEqual(metadata["hxtDefaultQualityTarget"],.3)
             self.assertFalse(metadata["targetIsMeasuredMinSICN"])
             self.assertFalse(metadata["optimisationSuccessVerified"])
+        interior=remesh.optimisation_metadata("gmsh-interior")
+        self.assertEqual(remesh.volume_mesh_options(1/32,"gmsh-interior"),unoptimised)
+        self.assertTrue(interior["postFillDefaultOptimisationRequested"])
+        self.assertEqual(interior["postFillDefaultOptimisationThreshold"],.3)
+        self.assertEqual(interior["postFillDefaultOptimisationMetric"],"Native gamma quality, not minSICN")
+        self.assertFalse(interior["postFillTargetOverride"])
+        self.assertFalse(interior["postFillIterationBoundClaimed"])
         for invalid in ("auto","none",None,True):
             with TemporaryDirectory() as root,patch.object(remesh,"enforce_runtime_limits") as invoked:
                 target=Path(root)/"invalid-mode"
@@ -280,6 +304,102 @@ class RemeshContracts(unittest.TestCase):
             self.assertEqual(measured["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
             self.assertFalse(measured["qualityAndBoundaryGatesPassed"])
             self.assertIn("measured-volume-quality-diagnostics",[call.args[1] for call in checkpoint.call_args_list])
+
+    def interior_fixture(self, mutation=None, invalid_final_quality=False):
+        """Inert fake native adapter: these tetrahedra are unit fixtures only."""
+        options={}
+        class Mesh:
+            generated=False
+            optimised=False
+            calls=[]
+            def addNodes(self,*args): pass
+            def addElementsByType(self,*args): pass
+            def reclassifyNodes(self): pass
+            def createTopology(self,**kwargs): pass
+            def getNodes(self):
+                points=dict(POINTS)
+                if self.optimised:
+                    points[5]=(.25,.25,.25)
+                if (self.optimised and mutation=="coordinate") or (self.generated and mutation=="before-coordinate"):
+                    points[1]=(1e-15,0.,0.)
+                return list(points),[x for point in points.values() for x in point],[]
+            def generate(self,dimension): self.generated=True
+            def optimize(self,*args,**kwargs):
+                self.calls.append((args,kwargs))
+                self.optimised=True
+            def getElements(self,dimension,entity):
+                if dimension==3:
+                    if not self.optimised:
+                        return [4],[[100]],[[1,2,3,4]]
+                    return [4],[[101,102,103,104]],[[1,2,3,5,1,4,2,5,2,4,3,5,3,4,1,5]]
+                faces=list(FACES[:2] if entity==11 else FACES[2:])
+                if self.optimised and mutation=="winding" and entity==11:
+                    faces[0]=tuple(reversed(faces[0]))
+                if self.optimised and mutation=="missing-face" and entity==11:
+                    faces=faces[:-1]
+                if self.optimised and mutation=="zone-owner":
+                    faces=list(FACES[2:] if entity==11 else FACES[:2])
+                return [2],[list(range(1,len(faces)+1))],[[node for face in faces for node in face]]
+            def getElementQualities(self,tags,quantity):
+                value=-1e-15 if quantity=="minSICN" and (not self.optimised or invalid_final_quality) else .5
+                return [value]*len(tags)
+        mesh=Mesh();mesh.calls=[]
+        gmsh=SimpleNamespace(option=SimpleNamespace(setNumber=lambda key,value:options.update({key:value})),
+            model=SimpleNamespace(mesh=mesh,add=lambda *args:None,addDiscreteEntity=lambda *args:None,
+                getEntities=lambda dim:[(2,11),(2,12)],addPhysicalGroup=lambda *args:None,setPhysicalName=lambda *args:None,
+                remove=lambda:None,geo=SimpleNamespace(addSurfaceLoop=lambda *args:1,addVolume=lambda *args:1,synchronize=lambda:None)),
+            write=lambda path:Path(path).write_bytes(b"$MeshFormat\n2.2 0 8\n$EndMeshFormat\nSynthetic unit fixture only\n"))
+        model=self.model();model["nativeCounts"]={"cellCount":10,"nodeCount":4}
+        return gmsh,model,options
+
+    def test_interior_optimisation_captures_fresh_actual_counts_and_checks_boundary_before_after(self):
+        gmsh,model,options=self.interior_fixture()
+        progress={"optimisationMode":"gmsh-interior"}
+        with TemporaryDirectory() as root,patch.object(remesh,"checkpoint"):
+            result=remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+        self.assertEqual(options,remesh.volume_mesh_options(1/32,"unoptimised"))
+        self.assertEqual(gmsh.model.mesh.calls,[(('',),{"force":True})])
+        evidence=result["interiorOptimisationDiagnostics"]
+        self.assertEqual(evidence["before"]["exportedVolumeElementCount"],1)
+        self.assertEqual(evidence["after"]["exportedVolumeElementCount"],4)
+        self.assertEqual(evidence["before"]["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],1)
+        self.assertEqual(evidence["after"]["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],0)
+        self.assertTrue(evidence["completeNativeBoundaryBeforeVerified"])
+        self.assertTrue(evidence["completeNativeBoundaryAfterVerified"])
+        self.assertTrue(evidence["qualityAccepted"])
+        self.assertFalse(evidence["iterationBoundClaimed"])
+        self.assertFalse(result["optimisation"]["optimisationSuccessVerified"])
+        self.assertTrue(result["nativeBoundaryVolumeClosure"]["passed"])
+        json.dumps(result,allow_nan=False)
+
+    def test_interior_optimisation_rejects_exact_source_boundary_mutation_before_or_after(self):
+        for mutation in ("before-coordinate","coordinate","winding","missing-face","zone-owner"):
+            gmsh,model,_=self.interior_fixture(mutation)
+            progress={"optimisationMode":"gmsh-interior"}
+            with self.subTest(mutation=mutation),TemporaryDirectory() as root,patch.object(remesh,"checkpoint"):
+                with self.assertRaises(remesh.RemeshIssue):
+                    remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+                self.assertFalse((Path(root)/"impeller.msh").exists())
+            if mutation=="before-coordinate":
+                self.assertEqual(gmsh.model.mesh.calls,[])
+            else:
+                self.assertEqual(gmsh.model.mesh.calls,[(('',),{"force":True})])
+                evidence=progress["interiorOptimisationDiagnostics"]
+                self.assertEqual(evidence["after"]["exportedVolumeElementCount"],4)
+                self.assertFalse(evidence["completeNativeBoundaryAfterVerified"])
+                self.assertFalse(evidence["qualityAccepted"])
+
+    def test_interior_optimisation_never_tolerates_negative_final_native_quality(self):
+        gmsh,model,_=self.interior_fixture(invalid_final_quality=True)
+        progress={"optimisationMode":"gmsh-interior"}
+        with TemporaryDirectory() as root,patch.object(remesh,"checkpoint"):
+            with self.assertRaisesRegex(remesh.RemeshIssue,"positive Gmsh minSICN"):
+                remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+            self.assertFalse((Path(root)/"impeller.msh").exists())
+        evidence=progress["interiorOptimisationDiagnostics"]
+        self.assertTrue(evidence["completeNativeBoundaryAfterVerified"])
+        self.assertEqual(evidence["after"]["nativeQualityMetrics"]["minSICN"]["nonPositiveCount"],4)
+        self.assertFalse(evidence["qualityAccepted"])
 
     def test_interrupted_native_worker_report_removes_partial_mesh_and_never_claims_cfd(self):
         with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):

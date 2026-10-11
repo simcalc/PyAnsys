@@ -151,6 +151,7 @@ The initial volume trials have **not produced an accepted volume mesh**:
 | [38160027289](https://github.com/simcalc/PyAnsys/actions/runs/38160027289) | HXT entered native refinement and tetrahedron optimisation, then reached 300 seconds. The bounded native log tail and both unchanged source hashes are retained. The logged improving-subset counts are not accepted mesh cell counts. |
 | [38161734194](https://github.com/simcalc/PyAnsys/actions/runs/38161734194) | All 162 contracts passed on Ubuntu. Native HXT optimisation reached the 900-second deadline; source hashes remained unchanged. No complete mesh or solver result was produced. |
 | [38162936389](https://github.com/simcalc/PyAnsys/actions/runs/38162936389) | Unoptimised native volume fill completed in 6.7 seconds, then its exported tetrahedra failed the positive `minSICN` gate. No candidate was admitted or published as solver-ready. Native internal HXT counts are distinct from actual exported volume-element counts. |
+| [38163471462](https://github.com/simcalc/PyAnsys/actions/runs/38163471462) | All 211 contracts passed on Ubuntu. Actual exported impeller inventory: 489,775 tetrahedra and 129,605 nodes. Four signed condition numbers were negative (minimum −7.17e−15), while direct and native determinants remained positive. The measured packet records 5,143 nearly degenerate cells under its scale-relative diagnostic. The candidate remained rejected. |
 
 The next HXT trial has a **900-second** native meshing limit based on that
 measured optimisation progress. Its owned-worker supervisor retains a small
@@ -167,6 +168,15 @@ cell must still have positive volume and quality, retain boundary identity, meet
 the separately declared lighter-mesh budgets, and pass OpenFOAM `checkMesh` and
 interface checks before MRF. These cell budgets describe this learning trial,
 not an OpenFOAM licence limit.
+
+The separately selected `gmsh-interior` trial first uses unoptimised HXT,
+measures its actual cells, and verifies the complete fixed boundary. It then
+invokes Gmsh's default volume optimiser on that single component. A fresh
+measurement and exact boundary check follow before the unchanged quality,
+count and conversion gates. The native default optimizer's `niter` argument
+does not impose an iteration bound in 4.15.2; the owned 900-second watchdog is
+the actual runtime bound. No negative-quality tolerance, geometry welding,
+facet replacement or guessed cell count is accepted.
 
 The OpenFOAM adapter prepares a separate Foundation-12 SST/MRF case at the
 source's 1450 rpm and 90 kg/s. Water properties, the one-native-unit-to-one-metre
