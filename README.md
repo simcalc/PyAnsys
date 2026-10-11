@@ -586,3 +586,18 @@ wall resolution, mesh/time convergence, cavitation/NPSH3, physical transient
 and restart stay false until their respective actual research gates pass.
 No Main code, Pump database, engineering lock, local port or deployed Main
 application is modified by this public workflow.
+
+Run [38177037633](https://github.com/simcalc/PyAnsys/actions/runs/38177037633)
+completed both component mesh checks and reached the final merged mesh check.
+The unchanged native NCC coverage criterion rejected the impeller–volute
+connection. The workflow retained the generated meshes and native logs and
+skipped MRF execution. No steady solution, pressure sweep, NPSHr or physical
+transient follows from that trial.
+
+Downloaded mesh and baseline evidence retains its original native command
+paths. Read-only verification reconstructs the complete historical command
+tuple with strictly bounded pure POSIX/Windows paths; it reads and hashes all
+files from the actual current artifact folder. It never accesses or executes
+the historical directory. A fresh native run still requires every execution
+argument to target its current independent output folder. Relocation does not
+change source bytes, manifests, numerical criteria or engineering authority.

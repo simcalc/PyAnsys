@@ -114,7 +114,7 @@ def source_preparation(root, command_root):
     union = mesher.union.verify_output(root / "source-surface")
     proof = mesher.verify_surface_proof(root / "source-surface-check", root / "source-surface", union)
     components, authored = mesher.make_components(root / "source-surface", union)
-    require(report["nativeCommandArguments"] == mesher.commands(command_root, components),
+    require(report["nativeCommandArguments"] == geometry.historical_commands(command_root, components),
         "Bind historical native commands to the independently regenerated source inside points.")
     payloads = mesher.source_union_payloads(root / "source-surface")
     expected = {"authoredFileRecords": [mesher.union.file_row(p, b) for p, b in sorted(authored.items())],
@@ -129,9 +129,15 @@ def source_preparation(root, command_root):
 
 def validate_inputs(directory, *, command_root=None):
     root = mesher.inside(directory)
-    command_root = str(root) if command_root is None else command_root
-    require(isinstance(command_root, str) and 0 < len(command_root) <= 512 and not any(c in command_root for c in ('\n', '\r', '"', ';')),
-        "Preserve only a bounded original source command-root path; it is provenance, not a command to execute.")
+    if command_root is None:
+        recorded = json_file(root, mesher.REPORT).get("nativeCommandArguments")
+        require(isinstance(recorded, list) and len(recorded) == 15 and isinstance(recorded[0], list)
+            and len(recorded[0]) == 3 and recorded[0][:2] == ["blockMesh", "-case"],
+            "Derive source command provenance only from the exact recorded geometry command tuple.")
+        case_path = geometry.historical_command_root(recorded[0][2])
+        require(case_path.name == "impeller-case", "The recorded first source case must be the exact impeller component.")
+        command_root = str(case_path.parent)
+    command_root = str(geometry.historical_command_root(command_root))
     prepared = source_preparation(root, command_root)
     report = json_file(root, "snappy-execution.json")
     require(set(report) == SOURCE_REPORT_KEYS and report["schemaVersion"] == geometry.SCHEMA
@@ -158,7 +164,7 @@ def validate_inputs(directory, *, command_root=None):
     require(report["runtimeIdentityFile"] == runtime_row, "Actual source runtime bytes changed.")
     validate_runtime(mesher.union.read_json(runtime_raw))
     stages = report["stages"]
-    source_commands = geometry.commands(command_root, prepared["components"])
+    source_commands = geometry.historical_commands(command_root, prepared["components"])
     require(isinstance(stages, list) and len(stages) == len(source_commands), "Every actual geometry stage must be complete.")
     logs = []
     texts = {}
@@ -186,7 +192,7 @@ def validate_inputs(directory, *, command_root=None):
         name, index = expected["component"], component_quality_indices[i]
         old = report["components"][i]
         split_indices = [stage_index for stage_index, args in enumerate(source_commands)
-            if args[0] == "splitMeshRegions" and args[2] == str(Path(command_root).absolute() / expected["caseDirectory"])]
+            if args[0] == "splitMeshRegions" and args[2] == str(geometry.historical_command_root(command_root) / expected["caseDirectory"])]
         require(len(split_indices) == 1 and split_indices[0] < index,
             "Require one actual measured-seed region selection before each component quality check.")
         selection = geometry.verify_region_selection(root, expected, texts[split_indices[0]], command_root=command_root)
@@ -270,6 +276,29 @@ def authored_case_files(source, components):
 
 def commands(output):
     return original.commands(output)
+
+
+def historical_commands(command_root):
+    """Replay immutable argv lexically; never access or execute historical paths."""
+    root = geometry.historical_command_root(command_root)
+    case, other = str(root / "impeller-case"), str(root / "volute-case")
+    return [["mergeMeshes", "-case", case, "-addCases", '("' + other + '")', "-overwrite"],
+        ["createNonConformalCouples", "-case", case, "-overwrite"],
+        ["checkMesh", "-case", case, "-allGeometry", "-allTopology", "-writeSets"],
+        ["foamRun", "-case", case]]
+
+
+def historical_command_root(report):
+    recorded = report.get("nativeCommandArguments")
+    require(isinstance(recorded, list) and len(recorded) == 4 and isinstance(recorded[0], list)
+        and len(recorded[0]) == 6 and recorded[0][:2] == ["mergeMeshes", "-case"],
+        "Derive baseline command provenance only from the complete exact four-command tuple.")
+    case_path = geometry.historical_command_root(recorded[0][2])
+    require(case_path.name == "impeller-case", "The recorded baseline case must be the exact impeller master.")
+    command_root = str(geometry.historical_command_root(str(case_path.parent)))
+    require(recorded == historical_commands(command_root),
+        "Every saved baseline argument must share the same bounded historical root and exact reviewed command.")
+    return command_root
 
 
 def assumptions():
@@ -426,7 +455,7 @@ def prepare(snappy_execution_directory, output_directory, pressure_reference_abs
     physics_payloads = {"authored-physics/" + p: raw for p, raw in authored.items() if "/0/" in p}
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(), "status": STATUS,
         "exampleDataCommit": base.inventory.PIN, "foundationSourceCommit": mesher.SOURCE_COMMIT,
-        "sourceSnappyCommandRoot": str(source), "sourceSnappyExecutionReportSha256": verified["reportFile"]["sha256"],
+        "sourceSnappyCommandRoot": verified["commandRoot"], "sourceSnappyExecutionReportSha256": verified["reportFile"]["sha256"],
         "sourceGeometryPreparationReportSha256": verified["preparation"]["reportFile"]["sha256"], "sourceEvidenceDirectory": "source-snappy",
         "sourceEvidenceFileRecords": [mesher.union.file_row(p, raw) for p, raw in sorted(source_payloads.items())],
         "sourceComponentFiles": [{**row, "path": "source-snappy/" + row["path"]} for row in verified["snapshots"]],
@@ -478,7 +507,7 @@ def verify_output(directory, *, after_native_ncc=False):
     mesher.utc_timestamp(report["createdAt"])
     require(report["sourceEvidenceDirectory"] == "source-snappy" and report["classroomAssumptions"] == assumptions()
         and report["limits"] == LIMITS and report["sampling"] == SAMPLING and report["requiredAcceptance"] == REQUIRED_ACCEPTANCE
-        and report["claimBoundary"] == CLAIM and report["nativeCommandArguments"] == commands(root),
+        and report["claimBoundary"] == CLAIM and report["nativeCommandArguments"] == historical_commands(historical_command_root(report)),
         "Keep exact authored physics, pressure basis, scope, resource limits and four native commands.")
     source = validate_inputs(root / "source-snappy", command_root=report["sourceSnappyCommandRoot"])
     require(report["sourceSnappyExecutionReportSha256"] == source["reportFile"]["sha256"]

@@ -145,7 +145,8 @@ def build_manifest(execution_directory):
     require(verified["report"] == preparation and preparation.get("schemaVersion") == PREPARATION_SCHEMA and
             preparation.get("exampleDataCommit") == native.case_tool.inventory.PIN and
             preparation.get("mainApplicationWrites") is False and
-            preparation.get("nativeCommandArguments") == helper.commands(root), "CFD_SNAPPY_EXACT_BASELINE_PREPARATION_REQUIRED")
+            preparation.get("nativeCommandArguments") == helper.historical_commands(helper.historical_command_root(preparation)),
+            "CFD_SNAPPY_EXACT_BASELINE_PREPARATION_REQUIRED")
     assumptions = preparation["classroomAssumptions"]
     require(assumptions.get("rhoKgM3") == 998.2 and assumptions.get("muPaS") == .001002 and
             assumptions.get("gMS2") == 9.81 and assumptions.get("speedRpm") == 1450 and

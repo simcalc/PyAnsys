@@ -93,6 +93,50 @@ def selection_fixture(root,*,tiny_size=.01,seed_cell=0,reverse_internal=False,ba
 
 
 class NativeRegionSelectionTests(unittest.TestCase):
+    def test_linux_historical_commands_are_host_independent_and_never_accessed(self):
+        historical="/home/runner/work/_temp/frozen-snappy-native"
+        with patch.object(runner.Path,"absolute",side_effect=AssertionError("Historical metadata cannot resolve a native host path.")),\
+             patch.object(runner.base,"read_regular",side_effect=AssertionError("Historical metadata cannot read files.")),\
+             patch.object(runner.subprocess,"Popen",side_effect=AssertionError("Historical metadata cannot start processes.")):
+            root=runner.historical_command_root(historical)
+            self.assertIsInstance(root,runner.PurePosixPath)
+            authored=runner.historical_commands(historical,command_components())
+            self.assertEqual(len(authored),15)
+            self.assertEqual(authored[3],runner.historical_selection_command(historical,component()))
+            self.assertEqual(authored[3][2],historical+"/impeller-case")
+            self.assertEqual(authored[12][4],'("'+historical+'/volute-case")')
+            windows=runner.historical_commands(r"C:\Users\Fixture\native",command_components())
+            self.assertEqual(windows[3][2],r"C:\Users\Fixture\native\impeller-case")
+
+    def test_historical_roots_reject_traversal_empty_segments_directives_and_unbounded_values(self):
+        invalid=("relative/path","/","//host/share","/home//runner","/home/runner/","/home/./runner","/home/../runner",
+                 "/home/runner\\file","/home/a b","/home/$HOME","/home/a;touch","/home/\nrunner","/home/runner\x00",
+                 "https://host/path",r"\\host\share",r"C:relative", "C:\\",r"C:\Users\..\file",r"C:\Users\\file",
+                 "/"+"a"*1024,b"/home/runner")
+        for value in invalid:
+            with self.subTest(value=value),self.assertRaises(runner.surface.SurfaceCheckIssue):
+                runner.historical_command_root(value)
+
+    def test_linux_historical_selection_replays_using_only_local_hash_bound_inventory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);_,_,text=selection_fixture(root,compact_levels=True)
+            local=runner.retain_region_selection(root,component(),text)
+            historical="/home/runner/work/_temp/frozen-snappy-native"
+            # Synthetic archived-native metadata, never a real Linux execution.
+            saved=runner._region_selection(root,component(),text,command_root=historical)
+            path=root/"region-selection/impeller/selection-report.json"
+            path.write_bytes(runner.base.inventory.bounded_json(saved))
+            replay=runner.verify_region_selection(root,component(),command_root=historical)
+            self.assertEqual(replay["nativeCommandArguments"][2],historical+"/impeller-case")
+            self.assertEqual(replay["sourceNativeFileRecords"],local["sourceNativeFileRecords"])
+            self.assertEqual(replay["selectedNativeFileRecords"],local["selectedNativeFileRecords"])
+            self.assertEqual(replay["nativeAddressingFileRecords"],local["nativeAddressingFileRecords"])
+            self.assertFalse(replay["actualCfdRunVerified"])
+            with self.assertRaises(runner.surface.SurfaceCheckIssue):runner.verify_region_selection(root,component())
+            source=root/"region-selection/impeller/source-polyMesh/cellLevel"
+            source.write_bytes(source.read_bytes().replace(b"3{2}",b"3{1}"))
+            with self.assertRaises(runner.surface.SurfaceCheckIssue):runner.verify_region_selection(root,component(),command_root=historical)
+
     def test_native_uniform_compact_labels_match_counted_list_and_exact_selection(self):
         with tempfile.TemporaryDirectory() as temp:
             path=Path(temp)/"cellLevel"

@@ -12,7 +12,7 @@ from hashlib import sha256
 import json
 import math
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import selectors
 import shutil
@@ -46,20 +46,62 @@ def require(condition,action):
     surface.require(condition,action)
 
 
-def selection_command(output,component):
+def historical_command_root(value):
+    """Validate recorded argv provenance lexically; never access that path.
+
+    A downloaded Linux report retains its original POSIX command strings on
+    Windows. Pure path objects prevent host-specific conversion or resolution.
+    They confer no permission to read or execute the historical directory.
+    """
+    value=os.fspath(value) if isinstance(value,os.PathLike) else value
+    require(isinstance(value,str) and 0<len(value)<=1024,
+            "Historical native command provenance needs a bounded absolute path string.")
+    if value.startswith("/"):
+        parts=value[1:].split("/");path=PurePosixPath(value)
+    else:
+        require(re.match(r"^[A-Za-z]:[\\/]",value),
+                "Historical native command provenance requires a POSIX absolute path or an absolute local drive path.")
+        parts=re.split(r"[\\/]",value[3:]);path=PureWindowsPath(value)
+    require(parts and all(part not in {"",".",".."} and re.fullmatch(r"[A-Za-z0-9_.-]+",part) for part in parts)
+            and path.is_absolute(),
+            "Historical native command path segments must be plain, nonempty and free of traversal or directives.")
+    return path
+
+
+def _selection_command_from_root(root,component):
+    require(component.get("component") in COMPONENTS,"Use an exact fixed component identity for the native selection command.")
     seed=component["insidePointEvidence"]["pointNativeUnits"]
     require(isinstance(seed,list) and len(seed)==3 and all(isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in seed),
             "Use the finite actual measured three-coordinate source seed.")
     vector="("+" ".join(format(float(value),".17g") for value in seed)+")"
-    return ["splitMeshRegions","-case",str(Path(output).absolute()/(component["component"]+"-case")),"-insidePoint",vector,"-overwrite"]
+    return ["splitMeshRegions","-case",str(root/(component["component"]+"-case")),"-insidePoint",vector,"-overwrite"]
+
+
+def selection_command(output,component):
+    return _selection_command_from_root(Path(output).absolute(),component)
+
+
+def historical_selection_command(command_root,component):
+    """Reconstruct recorded selection argv only; no historical path access."""
+    return _selection_command_from_root(historical_command_root(command_root),component)
 
 
 def commands(output,components=None):
-    root=Path(output).absolute();rows=[]
+    root=Path(output).absolute()
     if components is None:
         report=json.loads(base.read_regular(root/"snappy-preparation.json",base.inventory.MAX_REPORT_BYTES))
         require(report.get("schemaVersion")==PREPARATION_SCHEMA,"Read measured selection seeds only from the exact preparation schema.")
         components=report.get("components")
+    return _commands_from_root(root,components)
+
+
+def historical_commands(command_root,components):
+    """Reconstruct all recorded geometry argv from explicit verified metadata."""
+    return _commands_from_root(historical_command_root(command_root),components)
+
+
+def _commands_from_root(root,components):
+    rows=[]
     require(isinstance(components,list) and [row.get("component") for row in components]==list(COMPONENTS),
             "Two source-verified component seeds in fixed order are required before authoring commands.")
     for name in COMPONENTS:
@@ -67,7 +109,7 @@ def commands(output,components=None):
         component=next(row for row in components if row["component"]==name)
         rows.extend([["blockMesh","-case",case],["surfaceFeatures","-case",case],
             ["snappyHexMesh","-case",case,"-overwrite"],
-            selection_command(root,component),
+            _selection_command_from_root(root,component),
             ["topoSet","-case",case,"-constant"],
             ["checkMesh","-case",case,"-allGeometry","-allTopology","-writeSets"]])
     case=str(root/"impeller-case");other=str(root/"volute-case")
@@ -426,10 +468,7 @@ def _region_selection(output,component,text,*,command_root=None):
     stage=3 if name=="impeller" else 9;log_path=f"logs/{stage:02d}-splitMeshRegions.log"
     log_raw,log_row=record(root,log_path,MAX_LOG)
     require(log_raw.decode("utf-8",errors="strict")==text,"Use the actual immutable native split log, not supplied replacement text.")
-    command_root=root if command_root is None else Path(command_root)
-    require(command_root.is_absolute() and len(str(command_root))<=512 and not any(c in str(command_root) for c in "\r\n\x00"),
-            "Historical native command provenance must be an explicit bounded absolute directory; it is never executed during replay.")
-    arguments=selection_command(command_root,component)
+    arguments=selection_command(root,component) if command_root is None else historical_selection_command(command_root,component)
     return {"schemaVersion":SELECTION_SCHEMA,"component":name,"status":"NATIVE_DISCONNECTED_REGION_SELECTION_VERIFIED",
         "sourceNativeFileRecords":source_rows,"selectedNativeFileRecords":selected_rows,"nativeAddressingFileRecords":map_rows,
         "nativeSplitLogFile":log_row,"nativeCommandArguments":arguments,"sourceSeedPointNativeUnits":component["insidePointEvidence"]["pointNativeUnits"],

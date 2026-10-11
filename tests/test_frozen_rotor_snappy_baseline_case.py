@@ -153,6 +153,39 @@ def merge_fields_and_add_constraints(output):
 
 
 class SnappyBaselineCaseTests(unittest.TestCase):
+    def test_relocated_source_and_baseline_replay_unchanged_historical_commands_and_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); source, stack = source_fixture(root)
+            with stack:
+                original_root = str(source)
+                moved_source = root / "relocated-source"; source.rename(moved_source)
+                output = root / "baseline"; report = case.prepare(moved_source, output)
+                self.assertEqual(report["sourceSnappyCommandRoot"], original_root)
+                before = {p.relative_to(output).as_posix(): sha256(p.read_bytes()).hexdigest()
+                    for p in output.rglob("*") if p.is_file()}
+                relocated = root / "relocated-baseline"; output.rename(relocated)
+                self.assertEqual(case.verify_output(relocated)["report"], report)
+                self.assertNotEqual(report["nativeCommandArguments"], case.commands(relocated))
+                self.assertEqual(before, {p.relative_to(relocated).as_posix(): sha256(p.read_bytes()).hexdigest()
+                    for p in relocated.rglob("*") if p.is_file()})
+                preparation = relocated / case.REPORT
+                tampered = json.loads(preparation.read_bytes())
+                tampered["nativeCommandArguments"][1][2] = str(root / "different-baseline" / "impeller-case")
+                preparation.write_bytes(case.encoded(tampered))
+                with self.assertRaises(case.BaselineCaseIssue): case.verify_output(relocated)
+
+    def test_historical_baseline_tuple_requires_one_complete_safe_root(self):
+        root = "/home/runner/work/_temp/frozen-snappy-baseline"
+        report = {"nativeCommandArguments": case.historical_commands(root)}
+        self.assertEqual(case.historical_command_root(report), root)
+        for arguments in (report["nativeCommandArguments"][:-1],
+                [["mergeMeshes", "-case", "/home/runner/../outside/impeller-case", "-addCases", "()", "-overwrite"]],
+                case.historical_commands(root)):
+            altered = json.loads(json.dumps(arguments))
+            if len(altered) == 4: altered[-1].append("-postProcess")
+            with self.subTest(arguments=altered), self.assertRaises(Exception):
+                case.historical_command_root({"nativeCommandArguments": altered})
+
     def test_exact_physics_recipe_pressure_gravity_roles_and_background(self):
         for component in ("impeller","volute"):
             files = case.case_files(component)

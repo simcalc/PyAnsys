@@ -5,6 +5,7 @@ from hashlib import sha256
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,27 @@ spec.loader.exec_module(tool)
 
 
 class ApproximateBaselineReduction(unittest.TestCase):
+    def test_identical_relocated_actual_evidence_reduces_without_relabeling_commands(self):
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); original = root / "original"; original.mkdir()
+            self.fixture(original)
+            expected = tool.reduce_native_baseline(original)
+            source_inventory = {p.relative_to(original).as_posix(): sha256(p.read_bytes()).hexdigest()
+                for p in original.rglob("*") if p.is_file()}
+            moved = root / "relocated"; shutil.copytree(original, moved)
+            actual = tool.reduce_native_baseline(moved)
+            self.assertEqual(expected, actual)
+            self.assertTrue(actual["numericalBaselineQualified"])
+            self.assertEqual(source_inventory, {p.relative_to(moved).as_posix(): sha256(p.read_bytes()).hexdigest()
+                for p in moved.rglob("*") if p.is_file()})
+            preparation = moved / "openfoam-preparation.json"
+            changed = json.loads(preparation.read_bytes())
+            changed["nativeCommandArguments"][1][2] = str(root / "different" / "impeller-case")
+            preparation.write_bytes(tool.encoded(changed))
+            result = tool.reduce_native_baseline(moved)
+            self.assertFalse(result["numericalBaselineQualified"])
+            self.assertFalse(result["actualCfdRunVerified"])
+
     def write(self, root, path, value):
         raw = value if isinstance(value, bytes) else value.encode("ascii")
         target = root / path
