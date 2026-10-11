@@ -188,6 +188,8 @@ def verify_emitted_baseline(execution_directory, packet):
     require(isinstance(rows, list) and rows and all(isinstance(row, dict) for row in rows), "Actual manifest file records are required.")
     allowed = allowed_master | {"impeller-case/" + name for name in allowed_case}
     verified = file_records(root, [{key: row.get(key) for key in ("path", "bytes", "sha256")} for row in rows], allowed)
+    require(any(row.get("path") == "geometry-identity.json" and row.get("control") == "geometrySha256" for row in rows),
+            "The actual canonical source geometry identity must be included in the native manifest.")
     for control in protocol.CONTROL_KEYS - {"cavitationModelSha256"}:
         selected = sorted([{key: row[key] for key in ("path", "bytes", "sha256")} for row in rows if row.get("control") == control], key=lambda row: row["path"])
         require(selected and sha256(canonical(selected)).hexdigest() == observation["controls"][control],
@@ -301,10 +303,22 @@ def prepare(case_directory, packet, output_directory, *, pressure_absolute_pa, m
     require(protocol.number(pressure_absolute_pa, positive=True) <= observation["pressureLevelAbsolutePa"],
             "Choose an explicit pressure point no higher than the qualified noncavitating baseline; no pressure sweep is selected automatically.")
     files = native_recipe(study, pressure_absolute_pa, mode, dt_s, duration_s)
+    source_geometry_raw, source_geometry_record = None, None
+    if packet.get("schemaVersion") == NATIVE_REDUCTION_SCHEMA:
+        source_root = inside_runner(case_directory)
+        source_geometry_raw = base.read_regular(source_root / "geometry-identity.json", base.inventory.MAX_REPORT_BYTES)
+        source_geometry_record = {"name": "geometry-identity.json", "bytes": len(source_geometry_raw),
+                                  "sha256": sha256(source_geometry_raw).hexdigest()}
+        source_geometry = json_file(source_root / "geometry-identity.json")
+        require(source_geometry.get("schemaVersion") == "untirta.frozen-rotor-fixed-geometry-identity.v1"
+                and source_geometry.get("exampleDataCommit") == base.inventory.PIN,
+                "Preserve the actual source-pinned canonical geometry identity unchanged.")
     destination = Path(output_directory).absolute()
     base.inventory.output_path(destination / "phase-change-preparation.json")
     require(not destination.exists(), "Use a fresh independent RUNNER_TEMP output directory.")
     destination.mkdir(parents=True)
+    if source_geometry_raw is not None:
+        base.write_exclusive(destination / "geometry-identity.json", source_geometry_raw)
     copied = []
     for row in source_files:
         if not row["path"].startswith("constant/polyMesh/"):
@@ -322,6 +336,8 @@ def prepare(case_directory, packet, output_directory, *, pressure_absolute_pa, m
               "status": "PHASE_CHANGE_CASE_PREPARED_NATIVE_EXECUTION_REQUIRED", "mode": mode,
               "exampleDataCommit": base.inventory.PIN, "openFoamFoundationVersion": 12,
               "sourceBaselineEvidenceSha256": observation["nativeEvidence"]["sha256"],
+              "sourceGeometryControlSha256": observation["controls"]["geometrySha256"],
+              "sourceGeometryIdentityFile": source_geometry_record,
               "sourceBaselineRole": "Conditional single-phase preparation prerequisite and provenance; not automatically the phase-change head reference.",
               "phaseFamilyReferenceRequired": "Execute and qualify a high-pressure active-phase reference with the same authored controls and MRF or sliding family before its pressure sweep; require actual global alpha_v<=1e-4.",
               "sourceCaseManifestSha256": input_manifest_hash, "preservedNativeMeshFiles": copied,

@@ -157,7 +157,8 @@ class NativeCampaignContracts(unittest.TestCase):
                 name=row["path"]
                 control="meshSha256" if name.startswith("constant/polyMesh/") else "discretizationSha256" if name.startswith("system/") else "boundarySha256"
                 files.append({**row,"path":"impeller-case/"+name,"control":control})
-            for name,control,body in (("openfoam-preparation.json","geometrySha256",{"exampleDataCommit":campaign.base.inventory.PIN,"mainApplicationWrites":False}),
+            for name,control,body in (("openfoam-preparation.json",None,{"exampleDataCommit":campaign.base.inventory.PIN,"mainApplicationWrites":False}),
+                                      ("geometry-identity.json","geometrySha256",{"schemaVersion":"untirta.frozen-rotor-fixed-geometry-identity.v1","exampleDataCommit":campaign.base.inventory.PIN}),
                                       ("runtime-identity.json","runtimeSha256",{"fixtureKind":"SYNTHETIC-NOT-NATIVE"})):
                 path=root/name;path.write_text(json.dumps(body),encoding="ascii")
                 files.append({**record(path,root),"control":control})
@@ -188,6 +189,16 @@ class NativeCampaignContracts(unittest.TestCase):
             verified=campaign.verify_baseline(root,packet)
             self.assertEqual(verified[0],source)
             self.assertEqual(verified[4],sha256(manifest_path.read_bytes()).hexdigest())
+            geometry_raw=(root/"geometry-identity.json").read_bytes()
+            prepared=campaign.prepare(root,packet,Path(temp)/"phase-native",pressure_absolute_pa=50000,mode="steady-sweep",dt_s=.0001,duration_s=.3)
+            self.assertEqual((Path(temp)/"phase-native/geometry-identity.json").read_bytes(),geometry_raw)
+            self.assertEqual(prepared["sourceGeometryIdentityFile"]["sha256"],sha256(geometry_raw).hexdigest())
+            (root/"geometry-identity.json").unlink()
+            with self.assertRaises((campaign.CampaignIssue,campaign.base.CaseIssue,OSError)):
+                campaign.verify_baseline(root,packet)
+            (root/"geometry-identity.json").write_bytes(geometry_raw+b" ")
+            with self.assertRaises(campaign.CampaignIssue):campaign.verify_baseline(root,packet)
+            (root/"geometry-identity.json").write_bytes(geometry_raw)
             wrong_directory=deepcopy(packet)
             for row in wrong_directory["nativeEvidenceRecords"]:
                 if "/postProcessing/" in row["path"]:

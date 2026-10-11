@@ -150,6 +150,7 @@ The initial volume trials have **not produced an accepted volume mesh**:
 | [38158266363](https://github.com/simcalc/PyAnsys/actions/runs/38158266363) | Exact native surface facets were preserved; Delaunay volume fill reached the 300-second limit. Its progress artifact establishes the last native stage, not a completed mesh. |
 | [38160027289](https://github.com/simcalc/PyAnsys/actions/runs/38160027289) | HXT entered native refinement and tetrahedron optimisation, then reached 300 seconds. The bounded native log tail and both unchanged source hashes are retained. The logged improving-subset counts are not accepted mesh cell counts. |
 | [38161734194](https://github.com/simcalc/PyAnsys/actions/runs/38161734194) | All 162 contracts passed on Ubuntu. Native HXT optimisation reached the 900-second deadline; source hashes remained unchanged. No complete mesh or solver result was produced. |
+| [38162936389](https://github.com/simcalc/PyAnsys/actions/runs/38162936389) | Unoptimised native volume fill completed in 6.7 seconds, then its exported tetrahedra failed the positive `minSICN` gate. No candidate was admitted or published as solver-ready. Native internal HXT counts are distinct from actual exported volume-element counts. |
 
 The next HXT trial has a **900-second** native meshing limit based on that
 measured optimisation progress. Its owned-worker supervisor retains a small
@@ -181,3 +182,37 @@ convergence checks. Test fixtures and generated dictionaries are not CFD results
 There is currently no qualified full-pump MRF baseline, cavitation NPSH3, or
 physical sliding-mesh transient result. These dependent stages remain pending
 until their native prerequisites pass.
+
+### Native active-phase execution path
+
+`Frozen Rotor native cavitation or sliding transient` is a separate manual
+workflow. It admits only a completed run from this repository's exact volume/MRF
+workflow, verifies every native case ZIP member against its manifest, and
+rechecks the byte-bound numerical baseline after transfer. Source admission and
+an uploaded archive alone never qualify a baseline. The outer source artifact
+budget includes separate MSH diagnostics; the native ZIP remains capped at
+128 MiB and its unpacked case at 512 MiB.
+
+The phase runner authors and hashes its actual SI input manifest before
+`checkMesh` and `foamRun`. Native execution facts are written once; the separate
+Python reducer checks signed `rhoPhi`, absolute Pa, liquid-section validity,
+phase fraction bounds, first nonlinear residuals, continuity, interface flux and
+coverage, and the actual Courant/time history. A final three-revolution window
+uses only actual bracketing samples and time-weighted integration. The workflow
+requires four to ten total revolutions to support that window; its default
+0.3 seconds is not an integer number of revolutions at 1450 rpm.
+
+Start the cavitation study with a numerically qualified high-pressure run using
+the active phase-change model. Its head can then be explicitly selected as
+that phase family's H0. The single-phase source head is a preparation
+prerequisite and is never silently reused as phase-change H0. Pressure cases
+must preserve the actual operating/configuration bindings and bracket the
+3% head drop before NPSH3 can be derived without extrapolation.
+
+`steady-sweep` uses fixed MRF with physical phase relaxation. `transient-sliding`
+uses actual rotating mesh points, which must be observed in retained native
+checkpoints. Its periodic observation, matched phase H0, mesh/time refinement
+and paired native restart verification remain separate acceptance checks.
+Neither prepared dictionaries nor parser tests establish that these native
+simulations have run. There is still no accepted full-pump volume mesh from
+the trials above, so this dependent workflow has not been dispatched.
