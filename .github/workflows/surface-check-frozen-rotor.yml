@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS \
+          sudo --preserve-env=PATH,RUNNER_TEMP,OMP_NUM_THREADS,OPENBLAS_NUM_THREADS,MKL_NUM_THREADS,NUMEXPR_NUM_THREADS,GITHUB_REPOSITORY,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,GITHUB_SHA \
             systemd-run --scope --unit="frozen-source-surfaces-${GITHUB_RUN_ID}" \
             -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
             /usr/bin/timeout --kill-after=10s 300s \

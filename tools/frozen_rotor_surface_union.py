@@ -13,6 +13,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 
@@ -24,6 +25,11 @@ REPORT = "surface-union-report.json"
 SOURCE_REPORT = "source-topology-report.json"
 SOURCE_REPORT_BYTES = 68245
 SOURCE_REPORT_SHA256 = "1dc7cebaeac04506dcfbe9da3ce123f149cc94cb44c6990b9b11c3f4195d2595"
+# Reviewed report from run 38155649489, with only the six declared run/runtime
+# fields omitted from canonical JSON. Every remaining nested value is pinned.
+SOURCE_TOPOLOGY_SHA256 = "73854afa711a4d7ef23e19ce989ecd959b11dbd4fadb87868355a412649d14b3"
+TOPOLOGY_RUN_FIELDS = ("extractedAt", "h5pyVersion", "hdf5Version", "githubRunId", "githubRunAttempt", "githubSourceCommit")
+SUPPORTED_READER_PAIRS = (("3.16.0", "2.0.0"),)
 MAX_STL_BYTES = 25 * 1024**2
 MAX_OBJ_BYTES = 128 * 1024**2
 MAX_REPORT_BYTES = 128 * 1024
@@ -58,6 +64,7 @@ FALSE_FLAGS = (
 TRUE_FLAGS = ("sourceStlFilesImmutable", "everySourceTriangleRetained", "stlFloat32CoordinatesPreserved",
               "stlVertexWindingPreserved", "sourcePatchTagsPreserved", "exactCoordinateIndexDeduplicationPerformed")
 REPORT_KEYS = {"schemaVersion", "preparedAt", "exampleDataRepository", "exampleDataCommit", "sourceTopologyReport",
+               "sourceTopologySemanticIdentity",
                "sourceStlFiles", "sourceStlBytes", "components", "coordinateUnits", "classroomMetresPerSourceCoordinateUnit",
                "coordinateRepresentation", "derivationMethod", "limits", "claimBoundary", *FALSE_FLAGS, *TRUE_FLAGS}
 
@@ -95,12 +102,43 @@ def expected_stls():
             for component, patches in STL_PINS.items() for zone, name, _, _, count, digest in patches]
 
 
+def topology_fingerprint(report):
+    """Pin the complete technical document while validating exact volatile roles."""
+    source.verify_report(report)
+    stamp = report.get("extractedAt")
+    require(isinstance(stamp, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:\+00:00|Z)", stamp),
+            "Extraction time must be a bounded actual UTC ISO timestamp.")
+    try:
+        require(datetime.fromisoformat(stamp).utcoffset().total_seconds() == 0,
+                "Extraction time must retain its UTC offset.")
+    except (ValueError, AttributeError) as exc:
+        raise SurfaceIssue("Use a valid actual UTC extraction timestamp.") from exc
+    require((report.get("h5pyVersion"), report.get("hdf5Version")) in SUPPORTED_READER_PAIRS,
+            "Use the explicitly reviewed h5py/HDF5 runtime pair; new versions require a supported-pair review.")
+    require(re.fullmatch(r"[1-9][0-9]{0,19}", report["githubRunId"])
+            and re.fullmatch(r"[1-9][0-9]{0,3}", report["githubRunAttempt"])
+            and re.fullmatch(r"[0-9a-f]{40}", report["githubSourceCommit"]),
+            "Current extraction must retain a positive run ID/attempt and exact 40-hex source commit.")
+    technical = {key: value for key, value in report.items() if key not in TOPOLOGY_RUN_FIELDS}
+    canonical = json.dumps(technical, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+    return sha256(canonical).hexdigest()
+
+
+def topology_identity(raw):
+    digest = topology_fingerprint(read_json(raw))
+    require(digest == SOURCE_TOPOLOGY_SHA256,
+            "Every substantive topology value must match the reviewed immutable source report.")
+    return {"sha256": digest,
+            "canonicalJson": "Sorted keys, compact separators, ASCII-escaped JSON; finite values only.",
+            "excludedTopLevelFields": list(TOPOLOGY_RUN_FIELDS),
+            "supportedReaderRuntimePairs": [{"h5pyVersion": h5py, "hdf5Version": hdf5} for h5py, hdf5 in SUPPORTED_READER_PAIRS],
+            "reviewedReferenceReport": {"bytes": SOURCE_REPORT_BYTES, "sha256": SOURCE_REPORT_SHA256}}
+
+
 def load_source(directory, report_name="topology-report.json", stl_directory=None):
     raw = source._regular_bytes(directory / report_name, MAX_REPORT_BYTES)
-    require(len(raw) == SOURCE_REPORT_BYTES and sha256(raw).hexdigest() == SOURCE_REPORT_SHA256,
-            "Use the exact published boundary topology report from run 38155649489.")
+    topology_identity(raw)
     report = read_json(raw)
-    source.verify_report(report)
     require(all(report.get(key) is False for key in source.FALSE_FLAGS)
             and all(report.get(key) is True for key in source.TRUE_FLAGS),
             "A derived surface inventory must not claim native quality or CFD execution.")
@@ -230,7 +268,8 @@ def convert_component(component, raw_files):
 def report_value(raw_topology, components):
     result = {"schemaVersion": SCHEMA, "preparedAt": datetime.now(timezone.utc).isoformat(),
               "exampleDataRepository": "https://github.com/ansys/example-data", "exampleDataCommit": source.PIN,
-              "sourceTopologyReport": file_row(SOURCE_REPORT, raw_topology), "sourceStlFiles": expected_stls(),
+              "sourceTopologyReport": file_row(SOURCE_REPORT, raw_topology),
+              "sourceTopologySemanticIdentity": topology_identity(raw_topology), "sourceStlFiles": expected_stls(),
               "sourceStlBytes": sum(row["bytes"] for row in expected_stls()), "components": components,
               "coordinateUnits": "UNVERIFIED", "classroomMetresPerSourceCoordinateUnit": 1,
               "coordinateRepresentation": "Original binary STL IEEE-754 float32 vertices serialized with 17 significant decimal digits; original HDF5 float64 polygon geometry is not reproduced.",

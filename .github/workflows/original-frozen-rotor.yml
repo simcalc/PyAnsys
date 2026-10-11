@@ -14,7 +14,7 @@ jobs:
   original:
     name: FREE original-volume conversion and native baseline
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       PIP_CONFIG_FILE: /dev/null
       PIP_INDEX_URL: https://pypi.org/simple

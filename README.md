@@ -453,3 +453,14 @@ unverified. Surface acceptance is separate from volume mesh acceptance,
 baseline, cavitation/NPSHr and transient qualification. Any later snappyHexMesh
 lane must explicitly report geometry approximation and satisfy all unchanged
 native volume, interface and numerical checks before CFD results are admitted.
+
+The first surface run, [38172357434](https://github.com/simcalc/PyAnsys/actions/runs/38172357434),
+passed **496 contract tests** and extracted all eleven surfaces, but stopped
+before native execution because the union reader incorrectly required a
+historical report's raw hash. Extraction time and GitHub run provenance change
+on each extraction. The reader now pins the complete technical document with
+exactly six declared run/runtime fields excluded from that semantic fingerprint.
+Those fields still require valid UTC time, run/attempt/commit provenance and the
+reviewed h5py/HDF5 pair. Every current raw report byte is copied and hash-bound,
+and all eleven STL byte pins remain unchanged. The extraction scope now also
+forwards its actual GitHub run provenance rather than publishing null fields.

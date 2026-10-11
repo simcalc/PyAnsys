@@ -50,6 +50,7 @@ def fixture(root):
     report.update(schemaVersion=union.source.SCHEMA, files=files, meshes=meshes,
                   exampleDataRepository="https://github.com/ansys/example-data", exampleDataCommit=union.source.PIN,
                   githubRepository=union.source.REPOSITORY, githubRunId="12345", githubRunAttempt="1", githubSourceCommit="a" * 40,
+                  extractedAt="2026-10-11T16:29:44.699374+00:00", h5pyVersion="3.16.0", hdf5Version="2.0.0",
                   coordinateUnits="UNVERIFIED", sourceFileBytes=sum(size for size, _ in union.source.MESH_SOURCES.values()),
                   derivedSurfaceBytes=sum(item["bytes"] for item in files))
     report.update({key: False for key in union.source.FALSE_FLAGS})
@@ -60,6 +61,7 @@ def fixture(root):
     stack.enter_context(patch.object(union, "STL_PINS", pins))
     stack.enter_context(patch.object(union, "SOURCE_REPORT_BYTES", len(raw)))
     stack.enter_context(patch.object(union, "SOURCE_REPORT_SHA256", sha256(raw).hexdigest()))
+    stack.enter_context(patch.object(union, "SOURCE_TOPOLOGY_SHA256", union.topology_fingerprint(report)))
     return directory, report, stack
 
 
@@ -99,6 +101,81 @@ class SurfaceUnionTests(unittest.TestCase):
         self.assertEqual(sum(row["triangleCount"] for row in rows), 296060)
         self.assertEqual(sum(row["bytes"] for row in rows), 14803924)
         self.assertEqual(union.source.PIN, "8ef505f6ef699eeec68a16001df91ba353342f40")
+
+    def test_fresh_utc_and_current_run_provenance_accept_identical_technical_document(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs, report, stack = fixture(root)
+            with stack:
+                before = (inputs / "topology-report.json").read_bytes()
+                original_identity = union.topology_fingerprint(report)
+                report.update(extractedAt="2026-10-12T01:23:45Z", githubRunId="38172357434",
+                              githubRunAttempt="2", githubSourceCommit="b" * 40)
+                # A changed timestamp, run identity and JSON spacing/order do
+                # not alter the fully pinned technical document.
+                raw = json.dumps(report, separators=(",", ":"), allow_nan=False).encode("ascii")
+                self.assertNotEqual(raw, before)
+                (inputs / "topology-report.json").write_bytes(raw)
+                output = root / "union"
+                result = union.prepare(inputs, output, runner_temp=root)
+                self.assertEqual(union.topology_fingerprint(report), original_identity)
+                self.assertEqual((output / union.SOURCE_REPORT).read_bytes(), raw)
+                self.assertEqual(result["sourceTopologyReport"]["sha256"], sha256(raw).hexdigest())
+                self.assertEqual(result["sourceTopologyReport"]["bytes"], len(raw))
+                identity = result["sourceTopologySemanticIdentity"]
+                self.assertEqual(identity["sha256"], original_identity)
+                self.assertEqual(identity["excludedTopLevelFields"], list(union.TOPOLOGY_RUN_FIELDS))
+                self.assertEqual(identity["reviewedReferenceReport"]["sha256"], sha256(before).hexdigest())
+                self.assertEqual(union.verify_output(output, runner_temp=root)["report"], result)
+
+    def test_any_substantive_nested_report_mutation_is_rejected(self):
+        def mutate(inputs, report, mutation):
+            mutation(report)
+            (inputs / "topology-report.json").write_bytes(union.encoded(report))
+        mutations = (
+            lambda r: r["meshes"][0].update(nativeCounts={"cellCount": 7}),
+            lambda r: r["meshes"][0].update(signedEnclosedVolumeNativeUnitsCubed=-.2),
+            lambda r: r["meshes"][0]["boundaryZones"][0].update(faceCount=2),
+            lambda r: r["meshes"][0].update(boundaryTopologyAudit={"closed": True}),
+            lambda r: r.update(limits={"maximumFacesPerMesh": 1}),
+            lambda r: r.update(derivationMethod="changed triangulation policy"),
+            lambda r: r.update(claimBoundary="changed numerical claim"),
+            lambda r: r.update(nativeCoordinateUnitsVerified=True),
+            lambda r: r.update(githubRepository="other/PyAnsys"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.reject_inputs(lambda inputs, report: mutate(inputs, report, mutation))
+
+    def test_declared_volatile_fields_still_require_supported_provenance(self):
+        invalid = (
+            {"extractedAt": None}, {"extractedAt": "2026-10-12"},
+            {"extractedAt": "2026-10-12T01:23:45+07:00"},
+            {"extractedAt": "2026-02-30T01:23:45+00:00"},
+            {"h5pyVersion": "unknown"}, {"hdf5Version": "999.0.0"},
+            {"h5pyVersion": "3.16.0", "hdf5Version": "1.14.6"},
+            {"githubRunId": None}, {"githubRunId": "0"}, {"githubRunId": "1" * 21},
+            {"githubRunAttempt": None}, {"githubRunAttempt": "0"},
+            {"githubSourceCommit": None}, {"githubSourceCommit": "b" * 39},
+            {"githubSourceCommit": "not-a-commit"},
+        )
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                self.reject_inputs(lambda inputs, report: (inputs / "topology-report.json").write_bytes(union.encoded({**report, **changes})))
+
+    def test_even_allowed_timestamp_change_requires_new_downstream_raw_byte_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs, _, stack = fixture(root)
+            with stack:
+                output = root / "union"
+                union.prepare(inputs, output, runner_temp=root)
+                target = output / union.SOURCE_REPORT
+                value = json.loads(target.read_bytes())
+                value["extractedAt"] = "2026-10-12T01:23:45+00:00"
+                target.write_bytes(union.encoded(value))
+                with self.assertRaises(union.SurfaceIssue):
+                    union.verify_output(output, runner_temp=root)
 
     def test_signed_zero_bits_are_distinct_index_entries(self):
         raw_files = {}
