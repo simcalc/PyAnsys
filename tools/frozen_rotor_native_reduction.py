@@ -103,6 +103,10 @@ def extract_invariant_inputs(preparation):
 
 def geometry_identity(remesh):
     """One fixed source boundary geometry, independent of volume mesh/attempt paths."""
+    try:
+        case_tool.validate_remesh_resource_profile(remesh)
+    except case_tool.CaseIssue as error:
+        raise protocol.ProtocolError("CFD_EXACT_REMESH_RESOURCE_PROFILE_REQUIRED:" + str(error)) from error
     require(remesh.get("schemaVersion") == "untirta.frozen-rotor-classroom-remesh.v1" and
             remesh.get("exampleDataCommit") == case_tool.inventory.PIN and remesh.get("status") == "VOLUME_MESH_GENERATED" and
             all(remesh.get(key) is True for key in ("volumeMeshGenerated", "originalMeshesImmutable")) and

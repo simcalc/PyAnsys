@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import test_frozen_openfoam_case as resource_fixtures
 from unittest.mock import patch
 
 TOOL = Path(__file__).resolve().parents[1] / "tools/frozen_rotor_native_reduction.py"
@@ -37,6 +38,7 @@ class NativeReductionContracts(unittest.TestCase):
                   **{key: False for key in ("boundaryRemeshed", "surfaceReparametrizationPerformed", "sourceGeometryFabricated",
                                           "nodeWeldingPerformed", "topologyHealingPerformed", "simulationExecuted", "actualCfdRunVerified", "mainApplicationWrites")},
                   "classroomScaleAssumption": {"nativeUnitsToMetres": 1, "verifiedFromSource": False},
+                  "limits": helper.remesh_resource_limits(),
                   "sources": [{"name": name, "bytes": helper.inventory.FILES[name][0], "sha256": helper.inventory.FILES[name][1]} for name in helper.inventory.MESH_NAMES],
                   "meshes": []}
         for component in ("impeller", "volute"):
@@ -208,6 +210,22 @@ class NativeReductionContracts(unittest.TestCase):
             remesh["meshes"][0]["boundaryZones"][0]["boundaryEquality"]["maximumCoordinateDifferenceNativeUnits"] = .01
             with self.assertRaisesRegex(native.protocol.ProtocolError, "FACET_COORDINATE"):
                 native.geometry_identity(remesh)
+
+    def test_extended_allocation_retains_same_geometry_signature_but_binds_its_actual_report(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original=self.fixture(root)
+            default=json.loads((root/"remesh-report.json").read_bytes());extended=resource_fixtures.extended_named_report(default)
+            self.assertEqual(native.geometry_identity(default),native.geometry_identity(extended))
+            row=self.write_json(root,"remesh-report.json",extended)
+            prep=json.loads((root/"openfoam-preparation.json").read_bytes());prep["remeshReportSha256"]=row["sha256"]
+            self.write_json(root,"openfoam-preparation.json",prep)
+            with patch.object(native,"binary_identity"):packet=native.build_manifest(root)
+            self.assertEqual(original["study"]["controls"]["geometrySha256"],packet["study"]["controls"]["geometrySha256"])
+            self.assertIn(row["sha256"],[v["sha256"] for v in packet["manifest"]["files"] if v["path"]=="remesh-report.json"])
+            extended["limits"]["maximumSeconds"]=2401
+            with self.assertRaisesRegex(native.protocol.ProtocolError,"RESOURCE_PROFILE"):native.geometry_identity(extended)
+            extended["limits"]["maximumSeconds"]=2400;extended["meshes"][0]["boundaryZones"][0]["boundaryEquality"]["maximumCoordinateDifferenceNativeUnits"] = .001
+            with self.assertRaisesRegex(native.protocol.ProtocolError,"FACET_COORDINATE"):native.geometry_identity(extended)
 
     def test_pressure_mapping_and_section_names_are_exact_not_header_guesses(self):
         with tempfile.TemporaryDirectory() as temp:

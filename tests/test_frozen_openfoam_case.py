@@ -40,6 +40,26 @@ $EndElements
 '''
 
 
+def extended_named_report(original):
+    """Declared synthetic profile fields; never proof of native utilization."""
+    report = copy.deepcopy(original)
+    report.update(resourceProfile="extended_free_hxt", limits=case.remesh_resource_limits("extended_free_hxt"),
+                  algorithm="hxt", gmshAlgorithm3D=10, gmshAlgorithmName="HXT", optimisation={"mode":"full", "meshOptimize":1})
+    for key in ("boundaryRemeshed", "surfaceReparametrizationPerformed", "sourceGeometryFabricated", "nodeWeldingPerformed", "topologyHealingPerformed"):
+        report[key] = False
+    for mesh in report["meshes"]:
+        mesh.update(algorithm="hxt", gmshAlgorithm3D=10, gmshAlgorithmName="HXT", optimisation={"mode":"full", "meshOptimize":1},
+                    boundaryRemeshed=False, surfaceReparametrizationPerformed=False)
+    report["runtimeResourceEvidence"] = {"publicRepository":"simcalc/PyAnsys", "manualWorkflowContextVerified":True,
+        "runnerEnvironment":"github-hosted", "runnerOs":"Linux", "availableCpuCount":4, "physicalMemoryBytes":16*1024**3,
+        "minimumCpuCount":4, "minimumPhysicalMemoryBytes":14*1024**3, "paidFallback":False, "customRunnerAllowed":False,
+        "basis":"Actual os.cpu_count and bounded procfs MemTotal; repository public verification is performed by the workflow guard.",
+        "addressSpaceSoftLimitBytes":8*1024**3, "addressSpaceHardLimitBytes":8*1024**3,
+        "workerOpenMpThreads":3, "workerBlasThreads":{"OPENBLAS_NUM_THREADS":1, "MKL_NUM_THREADS":1, "NUMEXPR_NUM_THREADS":1},
+        "nativeThreadOptions":{"General.NumThreads":3, "Mesh.MaxNumThreads1D":3, "Mesh.MaxNumThreads2D":3, "Mesh.MaxNumThreads3D":3}}
+    return report
+
+
 class PreparationContracts(unittest.TestCase):
     def test_actual_ascii_counts_positions_and_zone_identity(self):
         inventory = case.msh_inventory(MSH)
@@ -125,7 +145,8 @@ class PreparationContracts(unittest.TestCase):
         report = {"schemaVersion":"untirta.frozen-rotor-classroom-remesh.v1", "exampleDataCommit":case.inventory.PIN,
                   "status":"VOLUME_MESH_GENERATED", "volumeMeshGenerated":True, "originalMeshesImmutable":True,
                   "simulationExecuted":False,"actualCfdRunVerified":False,"mainApplicationWrites":False,
-                  "classroomScaleAssumption":{"nativeUnitsToMetres":1,"verifiedFromSource":False}, "sources":sources,"meshes":meshes}
+                  "classroomScaleAssumption":{"nativeUnitsToMetres":1,"verifiedFromSource":False}, "sources":sources,"meshes":meshes,
+                  "limits":case.remesh_resource_limits()}
         (root / "remesh-report.json").write_text(json.dumps(report))
         return report
 
@@ -145,6 +166,48 @@ class PreparationContracts(unittest.TestCase):
                 (root/"volute.msh").write_bytes(b"not a real mesh")
                 with self.assertRaises(case.CaseIssue):
                     case.validate_inputs(root)
+
+    def test_extended_named_profile_admits_current_bytes_without_changing_case_or_solver_budget(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)/"meshes";default=self.input_fixture(root);extended=extended_named_report(default)
+            with patch.object(case,"PATCHES",{"impeller":{"inlet"},"volute":{"mass-flow-inlet-11"}}):
+                first,default_hash=case.validate_inputs(root)
+                (root/"remesh-report.json").write_text(json.dumps(extended));second,extended_hash=case.validate_inputs(root)
+                self.assertEqual(first,second);self.assertNotEqual(default_hash,extended_hash)
+            self.assertEqual(case.validate_remesh_resource_profile(extended),"extended_free_hxt")
+            self.assertEqual(case.remesh_resource_limits()["maximumSeconds"],900)
+            self.assertEqual(case.remesh_resource_limits()["maximumAddressSpaceBytes"],2*1024**3)
+            self.assertIn("endTime 500",case.case_files("impeller")["system/controlDict"])
+
+    def test_profile_identity_limits_and_actual_hardware_enforcement_are_exact(self):
+        changes=(lambda v:v.pop("resourceProfile"),lambda v:v.update(resourceProfile="other"),lambda v:v.update(resourceProfile=[]),
+            lambda v:v.update(resourceProfile={}),
+            lambda v:v.pop("limits"),lambda v:v["limits"].update(threads=2),lambda v:v["limits"].update(threads=3.),
+            lambda v:v["limits"].update(maximumSeconds=3000),lambda v:v["limits"].update(maximumOutputBytes=256*1024**2),
+            lambda v:v["limits"].update(maximumCombinedCells=1000000),lambda v:v.update(algorithm="delaunay",gmshAlgorithm3D=1),
+            lambda v:v["optimisation"].update(mode="unoptimised",meshOptimize=0),lambda v:v["meshes"][0].update(gmshAlgorithm3D=1),
+            lambda v:v.update(boundaryRemeshed=True),lambda v:v.pop("runtimeResourceEvidence"),
+            lambda v:v["runtimeResourceEvidence"].update(availableCpuCount=3),lambda v:v["runtimeResourceEvidence"].update(availableCpuCount=4.),
+            lambda v:v["runtimeResourceEvidence"].update(availableCpuCount=4097),
+            lambda v:v["runtimeResourceEvidence"].update(physicalMemoryBytes=14*1024**3-1),
+            lambda v:v["runtimeResourceEvidence"].update(physicalMemoryBytes=1024**5+1),
+            lambda v:v["runtimeResourceEvidence"].update(runnerEnvironment="self-hosted"),lambda v:v["runtimeResourceEvidence"].update(paidFallback=True),
+            lambda v:v["runtimeResourceEvidence"].update(addressSpaceSoftLimitBytes=16*1024**3),
+            lambda v:v["runtimeResourceEvidence"]["workerBlasThreads"].update(OPENBLAS_NUM_THREADS=3),
+            lambda v:v["runtimeResourceEvidence"]["nativeThreadOptions"].update({"General.NumThreads":2}))
+        with tempfile.TemporaryDirectory() as temp:
+            original=extended_named_report(self.input_fixture(Path(temp)/"meshes"))
+            for change in changes:
+                report=copy.deepcopy(original);change(report)
+                with self.assertRaises(case.CaseIssue):case.validate_remesh_resource_profile(report)
+
+    def test_default_legacy_limits_are_exact_and_missing_metadata_cannot_hide_extension(self):
+        default={"limits":case.remesh_resource_limits()}
+        self.assertEqual(case.validate_remesh_resource_profile(default),"classroom")
+        for report in ({}, {"limits":case.remesh_resource_limits("extended_free_hxt")},
+                       {"limits":case.remesh_resource_limits(),"resourceProfile":"classroom"},
+                       {"limits":case.remesh_resource_limits(),"runtimeResourceEvidence":{}}):
+            with self.subTest(report=report),self.assertRaises(case.CaseIssue):case.validate_remesh_resource_profile(report)
 
     def test_preparation_new_runner_directory_no_execution_and_honest_manifest(self):
         with tempfile.TemporaryDirectory() as temp:

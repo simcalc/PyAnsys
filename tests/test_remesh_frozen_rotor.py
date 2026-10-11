@@ -24,6 +24,218 @@ FACES = [(1, 3, 2), (1, 2, 4), (2, 3, 4), (3, 1, 4)]
 
 
 class RemeshContracts(unittest.TestCase):
+    @staticmethod
+    def extended_evidence():
+        return {"publicRepository":"simcalc/PyAnsys", "manualWorkflowContextVerified":True,
+                "runnerEnvironment":"github-hosted", "runnerOs":"Linux", "availableCpuCount":4,
+                "physicalMemoryBytes":16*1024**3, "minimumCpuCount":4,
+                "minimumPhysicalMemoryBytes":remesh.MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES,
+                "paidFallback":False, "customRunnerAllowed":False,
+                "basis":"Actual os.cpu_count and bounded procfs MemTotal; repository public verification is performed by the workflow guard.",
+                "addressSpaceSoftLimitBytes":8*1024**3, "addressSpaceHardLimitBytes":8*1024**3,
+                "workerOpenMpThreads":3,
+                "workerBlasThreads":{"OPENBLAS_NUM_THREADS":1,"MKL_NUM_THREADS":1,"NUMEXPR_NUM_THREADS":1},
+                "nativeThreadOptions":{option:3.0 for option in remesh.GMSH_THREAD_OPTIONS}}
+
+    def test_exact_extended_profile_changes_only_three_resource_bounds(self):
+        original=remesh.complete_resource_limits()
+        extended=remesh.complete_resource_limits("extended_free_hxt")
+        self.assertEqual({key:value for key,value in extended.items() if key not in remesh.resource_limits()},
+                         {key:value for key,value in original.items() if key not in remesh.resource_limits()})
+        self.assertEqual(remesh.resource_limits(),{"threads":1,"maximumSeconds":900,"maximumAddressSpaceBytes":2*1024**3})
+        self.assertEqual(remesh.resource_limits("extended_free_hxt"),{"threads":3,"maximumSeconds":2400,"maximumAddressSpaceBytes":8*1024**3})
+        self.assertEqual(remesh.resource_profile_metadata(),{})
+        self.assertEqual(remesh.resource_profile_metadata("extended_free_hxt"),{"resourceProfile":"extended_free_hxt"})
+        self.assertEqual(remesh.volume_mesh_options(1/32)["Mesh.Optimize"],1)
+        evidence=self.extended_evidence()
+        self.assertIs(remesh.verified_extended_runtime_evidence(evidence),evidence)
+        for key,value in (("addressSpaceSoftLimitBytes",2*1024**3),("availableCpuCount",3),
+                          ("physicalMemoryBytes",8*1024**3),("manualWorkflowContextVerified",1),
+                          ("workerOpenMpThreads",True),("nativeThreadOptions",{option:1 for option in remesh.GMSH_THREAD_OPTIONS})):
+            with self.subTest(key=key),self.assertRaises(remesh.RemeshIssue):
+                remesh.verified_extended_runtime_evidence({**evidence,key:value})
+
+    def test_extended_unknown_profiles_or_wrong_algorithm_mode_reject_before_any_mutation(self):
+        selections=[(profile,"full","hxt") for profile in (True,None,"automatic",{"threads":3})]
+        selections += [("extended_free_hxt",mode,"hxt") for mode in ("unoptimised","gmsh-interior")]
+        selections += [("extended_free_hxt","unoptimised","delaunay")]
+        with TemporaryDirectory() as directory:
+            for profile,mode,algorithm in selections:
+                target=Path(directory)/"not-created"
+                with self.subTest(profile=profile,mode=mode,algorithm=algorithm),\
+                     patch.object(remesh,"extended_runner_evidence") as context,\
+                     patch.object(remesh.subprocess,"Popen") as launch,\
+                     patch.object(remesh,"enforce_runtime_limits") as limits:
+                    with self.assertRaises(remesh.RemeshIssue):remesh.run(target,mode,algorithm,profile)
+                    with self.assertRaises(remesh.RemeshIssue):remesh.supervised_run(target,mode,algorithm,profile)
+                    context.assert_not_called();launch.assert_not_called();limits.assert_not_called()
+                    self.assertFalse(target.exists())
+
+    def test_extended_actual_runner_guard_checks_context_and_available_capacity(self):
+        environment={"GITHUB_ACTIONS":"true","GITHUB_EVENT_NAME":"workflow_dispatch",
+                     "GITHUB_REPOSITORY":"simcalc/PyAnsys","PYANSYS_PUBLIC_REPOSITORY_VISIBILITY":"public",
+                     "RUNNER_OS":"Linux","RUNNER_ENVIRONMENT":"github-hosted"}
+        with TemporaryDirectory() as root:
+            path=Path(root)/"meminfo"
+            path.write_bytes(b"MemTotal:       16777216 kB\nMemFree: 1 kB\n")
+            with patch.dict(os.environ,environment,clear=True),patch.object(remesh.sys,"platform","linux"),\
+                 patch.object(remesh.os,"cpu_count",return_value=4),patch.object(remesh,"Path",return_value=path):
+                measured=remesh.extended_runner_evidence()
+                self.assertEqual(measured["availableCpuCount"],4)
+                self.assertEqual(measured["physicalMemoryBytes"],16*1024**3)
+                for key in environment:
+                    with self.subTest(key=key),patch.dict(os.environ,{key:"untrusted"}),self.assertRaises(remesh.RemeshIssue):
+                        remesh.extended_runner_evidence()
+                for cpus in (None,True,3):
+                    with self.subTest(cpus=cpus),patch.object(remesh.os,"cpu_count",return_value=cpus),self.assertRaises(remesh.RemeshIssue):
+                        remesh.extended_runner_evidence()
+                for raw in (b"MemTotal: 8388608 kB\n",b"MemTotal: 16777216 bytes\n",b"MemTotal: -1 kB\n",b"x"*(1024**2+1)):
+                    path.write_bytes(raw)
+                    with self.subTest(raw=raw[:30]),self.assertRaises(remesh.RemeshIssue):remesh.extended_runner_evidence()
+
+    def test_extended_rejects_capacity_before_output_or_worker_start(self):
+        with TemporaryDirectory() as directory,patch.object(remesh,"extended_runner_evidence",side_effect=remesh.RemeshIssue("Insufficient standard runner")),\
+             patch.object(remesh.subprocess,"Popen") as launch,patch.object(remesh,"enforce_runtime_limits") as enforce:
+            target=Path(directory)/"never-created"
+            with self.assertRaises(remesh.RemeshIssue):remesh.run(target,resource_profile="extended_free_hxt")
+            with self.assertRaises(remesh.RemeshIssue):remesh.supervised_run(target,resource_profile="extended_free_hxt")
+            self.assertFalse(target.exists());launch.assert_not_called();enforce.assert_not_called()
+
+    def test_extended_enforces_native_address_space_alarm_openmp_and_blas_controls(self):
+        from unittest.mock import Mock
+        limits=SimpleNamespace(RLIMIT_AS=9,setrlimit=Mock(),getrlimit=Mock(return_value=(8*1024**3,8*1024**3)))
+        source={key:value for key,value in self.extended_evidence().items()
+                if key not in ("addressSpaceSoftLimitBytes","addressSpaceHardLimitBytes","workerOpenMpThreads","workerBlasThreads","nativeThreadOptions")}
+        with patch.dict(sys.modules,{"resource":limits}),patch.object(remesh.sys,"platform","linux"),\
+             patch.object(remesh,"extended_runner_evidence",return_value=source),patch.dict(os.environ,{},clear=True),\
+             patch.object(remesh.signal,"SIGALRM",14,create=True),patch.object(remesh.signal,"signal"),\
+             patch.object(remesh.signal,"alarm",create=True) as alarm:
+            evidence=remesh.enforce_runtime_limits("extended_free_hxt")
+            limits.setrlimit.assert_called_once_with(9,(8*1024**3,8*1024**3))
+            alarm.assert_called_once_with(2400)
+            self.assertEqual(evidence["workerOpenMpThreads"],3)
+            self.assertEqual(evidence["workerBlasThreads"],{"OPENBLAS_NUM_THREADS":1,"MKL_NUM_THREADS":1,"NUMEXPR_NUM_THREADS":1})
+        limits.getrlimit.return_value=(2*1024**3,8*1024**3)
+        with patch.dict(sys.modules,{"resource":limits}),patch.object(remesh.sys,"platform","linux"),\
+             patch.object(remesh,"extended_runner_evidence",return_value=source),self.assertRaises(remesh.RemeshIssue):
+            remesh.enforce_runtime_limits("extended_free_hxt")
+
+    def test_extended_child_environment_retains_manual_context_without_credentials(self):
+        with patch.dict(os.environ,{"PYANSYS_PUBLIC_REPOSITORY_VISIBILITY":"public","GITHUB_EVENT_NAME":"workflow_dispatch",
+                "GH_TOKEN":"secret","GITHUB_EVENT_PATH":"secret-event","OMP_NUM_THREADS":"99","OPENBLAS_NUM_THREADS":"99"},clear=True):
+            environment=remesh.child_environment("extended_free_hxt")
+        self.assertEqual(environment["OMP_NUM_THREADS"],"3")
+        self.assertEqual(environment["OPENBLAS_NUM_THREADS"],"1")
+        self.assertEqual(environment["PYANSYS_PUBLIC_REPOSITORY_VISIBILITY"],"public")
+        self.assertEqual(environment["GITHUB_EVENT_NAME"],"workflow_dispatch")
+        self.assertNotIn("GH_TOKEN",environment);self.assertNotIn("GITHUB_EVENT_PATH",environment)
+
+    def test_extended_cli_propagates_only_explicit_named_profile(self):
+        for native in (False,True):
+            command=[str(TOOL),"--output-dir","synthetic-output","--resource-profile","extended_free_hxt"]
+            if native:command.append("--native-worker")
+            invoked=remesh.run if native else remesh.supervised_run
+            with patch.object(remesh.sys,"argv",command),patch.object(remesh,"run" if native else "supervised_run",
+                    return_value={"volumeMeshGenerated":False}) as called,patch("builtins.print"):
+                self.assertEqual(remesh.main(),2)
+            called.assert_called_once_with(Path("synthetic-output"),"full","hxt","extended_free_hxt")
+
+    def test_extended_worker_binds_measured_gmsh_threads_without_geometry_or_quality_relaxation(self):
+        from unittest.mock import Mock
+        options={}
+        native=SimpleNamespace(__version__=remesh.GMSH_VERSION,initialize=Mock(),
+            option=SimpleNamespace(setNumber=lambda key,value:options.update({key:value}),getNumber=lambda key:float(options[key])),
+            logger=SimpleNamespace(start=Mock(),get=lambda:[]),isInitialized=lambda:True,finalize=Mock(),
+            model=SimpleNamespace(mesh=SimpleNamespace(getLastEntityError=lambda:[])))
+        evidence=self.extended_evidence();evidence.pop("nativeThreadOptions")
+        def transferred(directory,name):
+            path=directory/name;path.write_bytes(b"Synthetic input, not native evidence");return path
+        def verified(path,name):return {"name":name,"bytes":1,"sha256":"a"*64,"sourceUrl":remesh.inventory.mesh_url(name)}
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False),\
+             patch.dict(sys.modules,{"gmsh":native}),patch.object(remesh,"extended_runner_evidence",return_value=evidence),\
+             patch.object(remesh,"enforce_runtime_limits",return_value=evidence) as enforce,\
+             patch.object(remesh.inventory,"download_mesh",side_effect=transferred),\
+             patch.object(remesh.inventory,"verify_file",side_effect=verified),patch.object(remesh.boundary,"read_native_mesh",return_value={}),\
+             patch.object(remesh,"remesh_component",side_effect=remesh.RemeshIssue("Synthetic geometry rejected, strict gates stay active")):
+            output=Path(root)/"trial"
+            summary=remesh.run(output,resource_profile="extended_free_hxt")
+            report=json.loads((output/"remesh-report.json").read_bytes())
+        enforce.assert_called_once_with("extended_free_hxt")
+        self.assertEqual({key:options[key] for key in remesh.GMSH_THREAD_OPTIONS},{key:3 for key in remesh.GMSH_THREAD_OPTIONS})
+        self.assertEqual(report["runtimeResourceEvidence"]["nativeThreadOptions"],{key:3.0 for key in remesh.GMSH_THREAD_OPTIONS})
+        self.assertEqual(report["limits"],remesh.complete_resource_limits("extended_free_hxt"))
+        self.assertFalse(summary["volumeMeshGenerated"])
+        for key in ("boundaryRemeshed","sourceGeometryFabricated","topologyHealingPerformed","actualCfdRunVerified","simulationExecuted"):
+            self.assertIs(report[key],False)
+
+    def test_extended_supervisor_passes_exact_profile_and_selects_2400_not_900_deadline(self):
+        # Inert owned-child mock; no native geometry/result is generated here.
+        class Stream:
+            def fileno(self):return 123
+            def close(self):pass
+        class Process:
+            stdout=Stream()
+            result=None
+            def poll(self):return self.result
+            def wait(self,timeout):self.result=0;return 0
+        class Selector:
+            active=True
+            def register(self,file,event):self.file=file
+            def get_map(self):return {1:True} if self.active else {}
+            def select(self,timeout):return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file):self.active=False
+            def close(self):pass
+        for elapsed,worker_profile in ((1000,"extended_free_hxt"),(2400,"extended_free_hxt"),(1000,"classroom")):
+            with self.subTest(elapsed=elapsed,worker_profile=worker_profile),TemporaryDirectory() as root,\
+                 patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False),patch.object(remesh.sys,"platform","linux"),\
+                 patch.object(remesh,"extended_runner_evidence",return_value=self.extended_evidence()):
+                target=Path(root)/"trial";process=Process()
+                def launched(*args,**kwargs):
+                    target.mkdir()
+                    remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),
+                        "optimisation":remesh.optimisation_metadata("full"),"resourceProfile":worker_profile,
+                        "limits":remesh.complete_resource_limits(worker_profile),"runtimeResourceEvidence":self.extended_evidence(),
+                        "status":"VOLUME_MESH_GENERATED","volumeMeshGenerated":True,"files":[],"meshes":[],
+                        "actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
+                    remesh.checkpoint({"destination":target,"started":0,"resourceProfile":"extended_free_hxt",
+                        "runtimeResourceEvidence":self.extended_evidence()},"synthetic-fill")
+                    return process
+                def stopped(owned):self.assertIs(owned,process);owned.result=-15
+                with patch.object(remesh.subprocess,"Popen",side_effect=launched) as launch,\
+                     patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),\
+                     patch.object(remesh.os,"read",return_value=b""),patch.object(remesh.time,"monotonic",side_effect=[0]+[elapsed]*30),\
+                     patch.object(remesh,"stop_owned_worker",side_effect=stopped) as stop,patch("builtins.print"):
+                    if worker_profile=="classroom":
+                        with self.assertRaisesRegex(remesh.RemeshIssue,"claim contract"):
+                            remesh.supervised_run(target,resource_profile="extended_free_hxt")
+                    else:
+                        summary=remesh.supervised_run(target,resource_profile="extended_free_hxt")
+                        self.assertEqual(summary["resourceProfile"],"extended_free_hxt")
+                        self.assertEqual(summary["volumeMeshGenerated"],elapsed<2400)
+                command=launch.call_args.args[0]
+                self.assertEqual(command[-2:],["--resource-profile","extended_free_hxt"])
+                self.assertEqual(launch.call_args.kwargs["env"]["OMP_NUM_THREADS"],"3")
+                if elapsed<2400:stop.assert_not_called()
+                else:
+                    stop.assert_called_once_with(process)
+                    recovered=json.loads((target/"remesh-report.json").read_bytes())
+                    self.assertEqual(recovered["limits"],remesh.complete_resource_limits("extended_free_hxt"))
+                    self.assertFalse(recovered["volumeMeshGenerated"])
+                tail=json.loads((target/"gmsh-native-tail.json").read_bytes())
+                self.assertEqual(tail["resourceProfile"],"extended_free_hxt")
+
+    def test_extended_recovery_rejects_other_profile_before_consuming_or_deleting_output(self):
+        with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+            output=Path(root)/"trial";output.mkdir()
+            partial=output/"impeller.msh";partial.write_bytes(b"Foreign profile partial must remain untouched")
+            remesh.persist_json(output,"remesh-progress.json",{"schemaVersion":remesh.SCHEMA,**remesh.algorithm_metadata(),
+                "optimisation":remesh.optimisation_metadata("full"),"resourceProfile":"classroom"})
+            with patch.object(remesh.inventory,"verify_file") as hashed,self.assertRaisesRegex(remesh.RemeshIssue,"resource profile"):
+                remesh.interrupted_report(output,"TIMEOUT",[],2400,-15,resource_profile="extended_free_hxt")
+            hashed.assert_not_called()
+            self.assertEqual(partial.read_bytes(),b"Foreign profile partial must remain untouched")
+            self.assertFalse((output/"remesh-report.json").exists())
+
     def test_exact_volume_duplicates_are_measured_without_distance_tolerance(self):
         result=remesh.duplicate_volume_connectivity([(1,2,3,4),(2,3,1,4),(1,2,3,5)],[11,12,13])
         self.assertEqual(result['duplicateConnectivityCount'],1)

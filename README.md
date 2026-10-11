@@ -153,7 +153,7 @@ The initial volume trials have **not produced an accepted volume mesh**:
 | [38162936389](https://github.com/simcalc/PyAnsys/actions/runs/38162936389) | Unoptimised native volume fill completed in 6.7 seconds, then its exported tetrahedra failed the positive `minSICN` gate. No candidate was admitted or published as solver-ready. Native internal HXT counts are distinct from actual exported volume-element counts. |
 | [38163471462](https://github.com/simcalc/PyAnsys/actions/runs/38163471462) | All 211 contracts passed on Ubuntu. Actual exported impeller inventory: 489,775 tetrahedra and 129,605 nodes. Four signed condition numbers were negative (minimum −7.17e−15), while direct and native determinants remained positive. The measured packet records 5,143 nearly degenerate cells under its scale-relative diagnostic. The candidate remained rejected. |
 
-The next HXT trial has a **900-second** native meshing limit based on that
+The default HXT lane has a **900-second** native meshing limit based on that
 measured optimisation progress. Its owned-worker supervisor retains a small
 diagnostic tail and enforces the deadline; the workflow cgroup separately limits
 aggregate memory to 2 GiB and CPU to one core, with swap disabled. Candidate
@@ -177,6 +177,42 @@ count and conversion gates. The native default optimizer's `niter` argument
 does not impose an iteration bound in 4.15.2; the owned 900-second watchdog is
 the actual runtime bound. No negative-quality tolerance, geometry welding,
 facet replacement or guessed cell count is accepted.
+
+### Separate full HXT trial within the standard FREE runner capacity
+
+The manual `Frozen Rotor full HXT optimisation on standard FREE runner`
+workflow uses the explicit `extended_free_hxt` profile: **three meshing threads,
+8 GiB address space/aggregate memory, and 2400 seconds**. The owned parent
+watchdog, native alarm and workflow cgroup enforce these bounds; the outer
+2430-second allowance permits bounded report retention. It requires the exact
+public `simcalc/PyAnsys` repository, a standard ephemeral Linux runner and
+measured capacity of at least four CPUs and 14 GiB RAM. The standard public
+Ubuntu-24.04 runner is documented as four CPUs and 16 GB RAM with FREE usage
+in [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#standard-github-hosted-runners-for-public-repositories).
+There is no paid, custom or self-hosted fallback. The default 900-second lane
+remains separate and unchanged.
+
+This fixed profile admits only HXT10 with full native optimisation enabled.
+It retains exact source float64 boundary coordinates, oriented facets and
+physical zone/seam ownership; it does not reuse the rejected unoptimised
+tetrahedral connectivity or move source geometry. Native thread-option readbacks,
+measured machine capacity, address-space limits and requested profile are
+recorded with the attempt. Every positive-cell, complete face-incidence,
+serialized-boundary, below-one-million-cell, output-byte, native `checkMesh`
+and NCC coverage gate remains mandatory. More time and parallelism do not
+establish that a valid mesh will result.
+
+This choice is based on actual run
+[38161734194](https://github.com/simcalc/PyAnsys/actions/runs/38161734194),
+which reached its deadline while full native HXT optimisation was still
+progressing. The distinct unoptimised/interior-optimised run
+[38167255453](https://github.com/simcalc/PyAnsys/actions/runs/38167255453)
+had actual overlapping/topologically invalid tetrahedra and is not admitted.
+If a fresh full HXT volume passes, the conditional preliminary SST/MRF path
+retains its separate **one-CPU, 2-GiB, 1200-second, 512-MiB-workspace** limits.
+An independent baseline reducer must also pass before workflow success.
+Physical geometry accuracy, wall resolution, convergence, cavitation/NPSHr and
+physical transient remain separate research acceptance stages.
 
 The OpenFOAM adapter prepares a separate Foundation-12 SST/MRF case at the
 source's 1450 rpm and 90 kg/s. Water properties, the one-native-unit-to-one-metre

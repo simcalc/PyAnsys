@@ -1,0 +1,133 @@
+name: Frozen Rotor full HXT optimisation on standard FREE runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-rotor-volume-remesh
+  cancel-in-progress: false
+
+jobs:
+  volume:
+    name: FREE bounded full HXT and conditional preliminary MRF
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE standard runner and measured capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/public_runner_guard.py
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          cpus = os.cpu_count()
+          match = re.search(r'^MemTotal:\s+(\d+) kB$', Path('/proc/meminfo').read_text(), re.M)
+          memory = int(match[1]) * 1024 if match else 0
+          if cpus is None or cpus < 4 or memory < 14 * 1024**3:
+              raise SystemExit('Measured standard FREE runner capacity does not admit this fixed profile.')
+          print(json.dumps({'measuredCpuCount': cpus, 'measuredMemoryBytes': memory,
+              'profile': 'extended_free_hxt', 'paidFallback': False}))
+          PY
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated pinned geometry runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install --no-install-recommends -y libglu1-mesa
+          python -m venv "$RUNNER_TEMP/volume-reader"
+          "$RUNNER_TEMP/volume-reader/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4 gmsh==4.15.2
+          "$RUNNER_TEMP/volume-reader/bin/python" -m pip check
+      - name: Verify resource profiles, geometry and engineering contracts
+        run: '"$RUNNER_TEMP/volume-reader/bin/python" -B -m unittest discover -s tests -v'
+      - name: Preserve exact native boundaries and attempt full parallel HXT optimisation
+        env:
+          PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-geometry-extended-${GITHUB_RUN_ID}" \
+            -p MemoryMax=8589934592 -p MemorySwapMax=0 -p CPUQuota=300% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 2430s \
+            "$RUNNER_TEMP/volume-reader/bin/python" -B tools/remesh_frozen_rotor.py \
+            --output-dir "$RUNNER_TEMP/frozen-rotor-remesh" \
+            --algorithm hxt --optimisation-mode full --resource-profile extended_free_hxt
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Convert and run preliminary MRF only after actual volume admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          python_path="$RUNNER_TEMP/volume-reader/bin/python"
+          test -x "$python_path"
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="frozen-pump-extended-${GITHUB_RUN_ID}" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 1230s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$python_path" -B tools/run_frozen_rotor_openfoam.py \
+            --mesh-directory "$RUNNER_TEMP/frozen-rotor-remesh" \
+            --output-directory "$RUNNER_TEMP/frozen-openfoam-case"
+      - name: Require actual independent preliminary baseline numerical acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/volume-reader/bin/python" -B tools/frozen_rotor_native_reduction.py \
+            --execution-directory "$RUNNER_TEMP/frozen-openfoam-case" \
+            > "$RUNNER_TEMP/frozen-openfoam-case/extended-native-baseline-recheck.json"
+          cat "$RUNNER_TEMP/frozen-openfoam-case/extended-native-baseline-recheck.json"
+      - name: Retain bounded source-bound volume and actual numerical evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frozen-rotor-extended-free-hxt-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frozen-rotor-remesh/remesh-report.json
+            ${{ runner.temp }}/frozen-rotor-remesh/impeller.msh
+            ${{ runner.temp }}/frozen-rotor-remesh/volute.msh
+            ${{ runner.temp }}/frozen-rotor-remesh/remesh-progress.json
+            ${{ runner.temp }}/frozen-rotor-remesh/gmsh-native-tail.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-preparation.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-execution.json
+            ${{ runner.temp }}/frozen-openfoam-case/openfoam-acceptance.json
+            ${{ runner.temp }}/frozen-openfoam-case/runtime-identity.json
+            ${{ runner.temp }}/frozen-openfoam-case/geometry-identity.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-input-manifest.json
+            ${{ runner.temp }}/frozen-openfoam-case/classroom-study.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-baseline-reduction.json
+            ${{ runner.temp }}/frozen-openfoam-case/extended-native-baseline-recheck.json
+            ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.zip
+            ${{ runner.temp }}/frozen-openfoam-case/native-case-evidence.json
+            ${{ runner.temp }}/frozen-openfoam-case/logs/*.log
+          if-no-files-found: error
+          retention-days: 1

@@ -29,6 +29,10 @@ SCHEMA = "untirta.frozen-rotor-classroom-remesh.v1"
 GMSH_VERSION = "4.15.2"
 MAX_SECONDS = 900
 MAX_MEMORY_BYTES = 2 * 1024**3
+RESOURCE_PROFILES = ("classroom", "extended_free_hxt")
+EXTENDED_SECONDS = 2400
+EXTENDED_MEMORY_BYTES = 8 * 1024**3
+MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES = 14 * 1024**3  # Nominal standard 16 GB runner.
 MAX_OUTPUT_BYTES = 128 * 1024**2  # Raw ASCII meshes; public ZIP budget is separate.
 MAX_NEW_CELLS_PER_COMPONENT = 800_000
 MAX_NEW_NODES_PER_COMPONENT = 500_000
@@ -43,8 +47,9 @@ VOLUME_CLOSURE_RELATIVE_TOLERANCE = 1e-8
 NATIVE_TAIL_LINES = 24
 NATIVE_LINE_CHARACTERS = 240
 CHILD_ENVIRONMENT_KEYS = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "RUNNER_OS",
-    "RUNNER_ENVIRONMENT", "GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_VISIBILITY", "GITHUB_RUN_ID",
-    "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_SERVER_URL", "PYTHONDONTWRITEBYTECODE")
+    "RUNNER_ENVIRONMENT", "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_VISIBILITY", "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "GITHUB_SERVER_URL", "PYTHONDONTWRITEBYTECODE", "PYANSYS_PUBLIC_REPOSITORY_VISIBILITY")
+GMSH_THREAD_OPTIONS = ("General.NumThreads", "Mesh.MaxNumThreads1D", "Mesh.MaxNumThreads2D", "Mesh.MaxNumThreads3D")
 SIZING_DIVISOR = 32
 DISTANCE_SAMPLES_PER_ZONE = 64
 REFERENCES = ["https://gmsh.info/doc/texinfo/gmsh.html#t13",
@@ -54,6 +59,85 @@ REFERENCES = ["https://gmsh.info/doc/texinfo/gmsh.html#t13",
 
 class RemeshIssue(inventory.InspectionIssue):
     pass
+
+
+def resource_limits(resource_profile="classroom"):
+    if not isinstance(resource_profile, str) or resource_profile not in RESOURCE_PROFILES:
+        raise RemeshIssue("Choose the exact classroom or extended_free_hxt resource profile.")
+    return {"threads": 3 if resource_profile == "extended_free_hxt" else 1,
+            "maximumSeconds": EXTENDED_SECONDS if resource_profile == "extended_free_hxt" else MAX_SECONDS,
+            "maximumAddressSpaceBytes": EXTENDED_MEMORY_BYTES if resource_profile == "extended_free_hxt" else MAX_MEMORY_BYTES}
+
+
+def resource_profile_metadata(resource_profile="classroom", mode="full", algorithm="hxt"):
+    resource_limits(resource_profile)
+    algorithm_metadata(algorithm)
+    optimisation_metadata(mode, algorithm)
+    if resource_profile == "extended_free_hxt" and (algorithm != "hxt" or mode != "full"):
+        raise RemeshIssue("The extended_free_hxt profile requires full native HXT10 optimisation only.")
+    # Default classroom evidence remains byte-for-byte compatible in shape.
+    return {"resourceProfile": resource_profile} if resource_profile != "classroom" else {}
+
+
+def complete_resource_limits(resource_profile="classroom"):
+    return {**resource_limits(resource_profile), "maximumOutputBytes": MAX_OUTPUT_BYTES,
+            "maximumReportBytes": inventory.MAX_REPORT_BYTES,
+            "maximumCellsPerComponent": MAX_NEW_CELLS_PER_COMPONENT,
+            "maximumNodesPerComponent": MAX_NEW_NODES_PER_COMPONENT,
+            "maximumCombinedCells": MAX_COMBINED_CELLS, "maximumCombinedNodes": MAX_COMBINED_NODES,
+            "rawOutputBudgetChange": "128 MiB raw MSH2 ASCII trial budget; compressed publication budget is separately enforced."}
+
+
+def verified_extended_runtime_evidence(value):
+    if not isinstance(value, dict):
+        raise RemeshIssue("Extended mesh completion requires actual native resource evidence.")
+    fixed = {"publicRepository": "simcalc/PyAnsys", "manualWorkflowContextVerified": True,
+             "runnerEnvironment": "github-hosted", "runnerOs": "Linux", "minimumCpuCount": 4,
+             "minimumPhysicalMemoryBytes": MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES,
+             "paidFallback": False, "customRunnerAllowed": False,
+             "basis": "Actual os.cpu_count and bounded procfs MemTotal; repository public verification is performed by the workflow guard.",
+             "addressSpaceSoftLimitBytes": EXTENDED_MEMORY_BYTES, "addressSpaceHardLimitBytes": EXTENDED_MEMORY_BYTES,
+             "workerOpenMpThreads": 3,
+             "workerBlasThreads": {"OPENBLAS_NUM_THREADS": 1, "MKL_NUM_THREADS": 1, "NUMEXPR_NUM_THREADS": 1},
+             "nativeThreadOptions": {option:3 for option in GMSH_THREAD_OPTIONS}}
+    if set(value) != {*fixed, "availableCpuCount", "physicalMemoryBytes"} or any(
+            type(value.get(key)) is not type(expected) or value[key] != expected for key, expected in fixed.items()):
+        raise RemeshIssue("Every actual resource/native thread setting must match the fixed extended profile.")
+    if any(type(value[key]) is not int or not minimum <= value[key] <= maximum for key, minimum, maximum in (
+            ("availableCpuCount", 4, 4096), ("physicalMemoryBytes", MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES, 1024**5))):
+        raise RemeshIssue("Actual standard runner CPU and physical memory capacity must support the extended profile.")
+    # Gmsh option readbacks are numeric doubles, while thread requests are ints.
+    if any(type(item) not in (int,float) or item != 3 for item in value["nativeThreadOptions"].values()) or any(
+            type(item) is not int or item != 1 for item in value["workerBlasThreads"].values()):
+        raise RemeshIssue("Actual Gmsh/OpenMP and single-threaded BLAS controls must retain their typed values.")
+    return value
+
+
+def extended_runner_evidence():
+    expected = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_REPOSITORY": "simcalc/PyAnsys", "PYANSYS_PUBLIC_REPOSITORY_VISIBILITY": "public",
+                "RUNNER_OS": "Linux", "RUNNER_ENVIRONMENT": "github-hosted"}
+    if sys.platform != "linux" or any(os.environ.get(key) != value for key, value in expected.items()):
+        raise RemeshIssue("The extended profile requires the verified manual public GitHub standard Ubuntu runner.")
+    cpu_count = os.cpu_count()
+    memory_file = Path("/proc/meminfo")
+    # procfs exposes zero st_size, despite bounded actual contents.
+    if not memory_file.is_file() or memory_file.is_symlink() or not 0 <= memory_file.stat().st_size <= 1024**2:
+        raise RemeshIssue("The actual standard runner memory inventory is required.")
+    with memory_file.open("rb") as stream:
+        raw = stream.read(1024**2 + 1)
+    match = re.search(rb"(?m)^MemTotal:[ \t]+([0-9]{1,16})[ \t]+kB[ \t]*$", raw)
+    if len(raw) > 1024**2 or not match:
+        raise RemeshIssue("Use the bounded actual procfs physical memory inventory.")
+    physical_memory = int(match.group(1)) * 1024
+    if type(cpu_count) is not int or cpu_count < 4 or physical_memory < MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES:
+        raise RemeshIssue("The extended profile requires at least four actual CPUs and the nominal standard16GB runner memory.")
+    return {"publicRepository": "simcalc/PyAnsys", "manualWorkflowContextVerified": True,
+            "runnerEnvironment": "github-hosted", "runnerOs": "Linux",
+            "availableCpuCount": cpu_count, "physicalMemoryBytes": physical_memory,
+            "minimumCpuCount": 4, "minimumPhysicalMemoryBytes": MINIMUM_EXTENDED_RUNNER_MEMORY_BYTES,
+            "paidFallback": False, "customRunnerAllowed": False,
+            "basis": "Actual os.cpu_count and bounded procfs MemTotal; repository public verification is performed by the workflow guard."}
 
 
 def algorithm_metadata(algorithm="hxt"):
@@ -204,7 +288,12 @@ def checkpoint(progress, stage):
              "generatedVolumeDiagnostics": progress.get("generatedVolumeDiagnostics"),
              "interiorOptimisationDiagnostics": progress.get("interiorOptimisationDiagnostics"),
              "preOptimisationFaceIncidence": progress.get("preOptimisationFaceIncidence"),
+             **resource_profile_metadata(progress.get("resourceProfile", "classroom"), progress.get("optimisationMode", "full"), progress.get("algorithm", "hxt")),
              "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
+    if progress.get("resourceProfile") == "extended_free_hxt":
+        value["limits"] = complete_resource_limits("extended_free_hxt")
+        if "runtimeResourceEvidence" in progress:
+            value["runtimeResourceEvidence"] = progress["runtimeResourceEvidence"]
     persist_json(progress["destination"], "remesh-progress.json", value)
 
 
@@ -610,7 +699,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         if not topology["accepted"]:
             raise RemeshIssue("Interior optimisation requires complete valid tetra face incidence before execution; invalid topology cannot be repaired implicitly.")
         evidence = {"nativeMethod": "gmsh.model.mesh.optimize('', force=True)", "iterationBoundClaimed": False,
-                    "externalMaximumSeconds": MAX_SECONDS, "nativeGammaThreshold": .3, "targetOverride": False,
+                    "externalMaximumSeconds": resource_limits(progress.get("resourceProfile", "classroom"))["maximumSeconds"], "nativeGammaThreshold": .3, "targetOverride": False,
                     "before": progress["generatedVolumeDiagnostics"], "after": None,
                     "completeNativeBoundaryBeforeVerified": True, "completeNativeBoundaryAfterVerified": False,
                     "boundaryBeforeAudit": before_audit, "nativeOptimisationReturned": False,
@@ -822,26 +911,41 @@ def preserve_msh2_float64_nodes(target, points):
             "reference": "https://github.com/live-clones/gmsh/blob/gmsh_4_15_2/src/geo/MVertex.cpp#L132"}
 
 
-def enforce_runtime_limits():
+def enforce_runtime_limits(resource_profile="classroom"):
+    limits = resource_limits(resource_profile)
     if sys.platform != "linux":
         raise RemeshIssue("Execute native Gmsh only on the isolated standard GitHub Ubuntu worker.")
+    evidence = extended_runner_evidence() if resource_profile == "extended_free_hxt" else None
     import resource
-    resource.setrlimit(resource.RLIMIT_AS, (MAX_MEMORY_BYTES, MAX_MEMORY_BYTES))
-    for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    resource.setrlimit(resource.RLIMIT_AS, (limits["maximumAddressSpaceBytes"], limits["maximumAddressSpaceBytes"]))
+    os.environ["OMP_NUM_THREADS"] = str(limits["threads"])
+    for key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[key] = "1"
+    if evidence is not None:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        if (soft, hard) != (limits["maximumAddressSpaceBytes"], limits["maximumAddressSpaceBytes"]):
+            raise RemeshIssue("The selected native address-space limits must actually be enforced.")
+        evidence.update(addressSpaceSoftLimitBytes=soft, addressSpaceHardLimitBytes=hard,
+                        workerOpenMpThreads=int(os.environ["OMP_NUM_THREADS"]),
+                        workerBlasThreads={key:int(os.environ[key]) for key in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")})
     def expired(signum, frame):
-        raise RemeshIssue(f"The bounded {MAX_SECONDS}-second classroom meshing attempt timed out.")
+        raise RemeshIssue(f"The bounded {limits['maximumSeconds']}-second meshing attempt timed out.")
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(MAX_SECONDS)
+    signal.alarm(limits["maximumSeconds"])
+    return evidence
 
 
-def run(value, optimisation_mode="full", algorithm="hxt"):
+def run(value, optimisation_mode="full", algorithm="hxt", resource_profile="classroom"):
     selected = algorithm_metadata(algorithm)
     optimisation = optimisation_metadata(optimisation_mode, algorithm)
+    profile = resource_profile_metadata(resource_profile, optimisation_mode, algorithm)
+    limits = resource_limits(resource_profile)
+    if profile:
+        extended_runner_evidence()  # Read-only rejection precedes any output/process mutation.
     destination = checked_output(value)
     started = time.monotonic()
     progress = {"component": None, "stage": "runtime-preflight", "started": started, "destination": destination,
-                "optimisationMode": optimisation_mode, "algorithm": algorithm}
+                "optimisationMode": optimisation_mode, "algorithm": algorithm, **profile}
     destination.mkdir(parents=True)
     checkpoint(progress, "runtime-preflight")
     cache = destination.parent / "frozen-rotor-mesh-inputs"
@@ -849,17 +953,14 @@ def run(value, optimisation_mode="full", algorithm="hxt"):
               "attemptMode": "native-boundary-preserved-tetra-fill", "boundaryRemeshed": False,
               **selected,
               "optimisation": optimisation,
-              "algorithmChangeBasis": "HXT10 remains the default efficient Delaunay implementation under the existing 900-second bound." if algorithm == "hxt"
+              **profile,
+              "algorithmChangeBasis": ("Explicit fresh full native HXT10 optimisation under the extended FREE standard-runner profile; the genuine 900-second native optimisation timeout is the basis, while every geometry/quality/topology gate is unchanged." if profile else "HXT10 remains the default efficient Delaunay implementation under the existing 900-second bound.") if algorithm == "hxt"
                   else "Explicit fresh Delaunay1/Tetgen-BR alternate after an HXT candidate failed exact tetra face incidence. Automatic optimisation is disabled; every source-boundary, positive-cell and native-quality gate remains required.",
               "surfaceReparametrizationPerformed": False,
               "exampleDataCommit": inventory.PIN, "gmshRequiredVersion": GMSH_VERSION, "references": REFERENCES,
               "coordinateUnits": "UNVERIFIED", "classroomScaleAssumption": {"nativeUnitsToMetres": 1, "verifiedFromSource": False,
                   "label": "Explicit teaching assumption: one native coordinate unit equals one metre; physical interpretation requires unit verification."},
-              "limits": {"threads": 1, "maximumSeconds": MAX_SECONDS, "maximumAddressSpaceBytes": MAX_MEMORY_BYTES,
-                  "maximumOutputBytes": MAX_OUTPUT_BYTES, "maximumReportBytes": inventory.MAX_REPORT_BYTES,
-                  "maximumCellsPerComponent": MAX_NEW_CELLS_PER_COMPONENT, "maximumNodesPerComponent": MAX_NEW_NODES_PER_COMPONENT,
-                  "maximumCombinedCells": MAX_COMBINED_CELLS, "maximumCombinedNodes": MAX_COMBINED_NODES,
-                  "rawOutputBudgetChange": "128 MiB raw MSH2 ASCII trial budget; compressed publication budget is separately enforced."},
+              "limits": complete_resource_limits(resource_profile),
               "sources": [], "meshes": [], "files": [], "status": "PREPARATION_REQUIRED", "volumeMeshGenerated": False,
               "originalMeshesImmutable": False, "nativeCoordinateUnitsVerified": False, "sourceGeometryFabricated": False,
               "nodeWeldingPerformed": False, "topologyHealingPerformed": False, "nativeCaseGenerated": False,
@@ -868,7 +969,10 @@ def run(value, optimisation_mode="full", algorithm="hxt"):
               "claimBoundary": "Classroom tetrahedral volume fill only; all native boundary facets remain fixed. Native units unverified; separate components and source patches preserved. OpenFOAM conversion, coupled interface, wall resolution, solver setup and CFD validation remain separate stages."}
     gmsh = None
     try:
-        enforce_runtime_limits()
+        runtime_evidence = enforce_runtime_limits(resource_profile) if profile else enforce_runtime_limits()
+        if profile:
+            report["runtimeResourceEvidence"] = runtime_evidence
+            progress["runtimeResourceEvidence"] = runtime_evidence
         import gmsh as native_gmsh
         import numpy as np
         gmsh = native_gmsh
@@ -878,8 +982,14 @@ def run(value, optimisation_mode="full", algorithm="hxt"):
         gmsh.option.setNumber("General.Terminal", 1)  # Supervisor persists a bounded native tail while C++ runs.
         gmsh.option.setNumber("General.Verbosity", 4)
         gmsh.logger.start()
-        for option in ("General.NumThreads", "Mesh.MaxNumThreads1D", "Mesh.MaxNumThreads2D", "Mesh.MaxNumThreads3D"):
-            gmsh.option.setNumber(option, 1)
+        for option in GMSH_THREAD_OPTIONS:
+            gmsh.option.setNumber(option, limits["threads"])
+        if profile:
+            measured_threads = {option:gmsh.option.getNumber(option) for option in GMSH_THREAD_OPTIONS}
+            if any(type(value) not in (float,int) or value != limits["threads"] for value in measured_threads.values()):
+                raise RemeshIssue("Every actual Gmsh native thread option must match the fixed extended profile.")
+            report["runtimeResourceEvidence"]["nativeThreadOptions"] = measured_threads
+            verified_extended_runtime_evidence(report["runtimeResourceEvidence"])
         report["gmshVersion"] = gmsh.__version__
         if cache.is_symlink() or getattr(cache, "is_junction", lambda: False)():
             raise RemeshIssue("Source cache must be a regular isolated runner directory.")
@@ -952,15 +1062,16 @@ def run(value, optimisation_mode="full", algorithm="hxt"):
         stream.write(raw)
     return {"status": report["status"], "stage": progress["stage"], "volumeMeshGenerated": report["volumeMeshGenerated"],
             "optimisationMode": optimisation_mode,
-            **selected,
+            **selected, **profile,
             "reportSha256": sha256(raw).hexdigest(), "reportBytes": len(raw), "files": report["files"],
             "totalGeneratedCells": sum(mesh["generatedCellCount"] for mesh in report["meshes"]),
             "actualCfdRunVerified": False, "mainApplicationWrites": False}
 
 
-def child_environment():
+def child_environment(resource_profile="classroom"):
+    limits = resource_limits(resource_profile)
     result = {key: os.environ[key] for key in CHILD_ENVIRONMENT_KEYS if key in os.environ}
-    result.update(PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    result.update(PYTHONDONTWRITEBYTECODE="1", OMP_NUM_THREADS=str(limits["threads"]), OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
     return result
 
 
@@ -979,10 +1090,12 @@ def stop_owned_worker(process):
         process.wait(timeout=3)
 
 
-def interrupted_report(destination, reason, tail, elapsed, returncode, optimisation_mode="full", algorithm="hxt"):
+def interrupted_report(destination, reason, tail, elapsed, returncode, optimisation_mode="full", algorithm="hxt", resource_profile="classroom"):
     """Recover factual progress and hashes after owned native-worker interruption."""
     selected = algorithm_metadata(algorithm)
     optimisation = optimisation_metadata(optimisation_mode, algorithm)
+    profile = resource_profile_metadata(resource_profile, optimisation_mode, algorithm)
+    limits = resource_limits(resource_profile)
     progress = {}
     path = destination/"remesh-progress.json"
     if path.exists() or path.is_symlink():
@@ -995,6 +1108,10 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
             raise RemeshIssue("Recovery progress must match this attempt's selected algorithm.")
         if progress.get("optimisation") != optimisation:
             raise RemeshIssue("Recovery progress must match this attempt's selected optimisation mode.")
+        if progress.get("resourceProfile", "classroom") != resource_profile:
+            raise RemeshIssue("Recovery progress must match this attempt's selected resource profile.")
+        if profile and progress.get("limits") != complete_resource_limits(resource_profile):
+            raise RemeshIssue("Recovery progress must match every fixed extended resource bound.")
     before = {row["name"]:row["sha256"] for row in progress.get("verifiedSources", [])
         if row.get("name") in inventory.MESH_NAMES and row.get("sha256") == inventory.FILES[row["name"]][1]
         and row.get("bytes") == inventory.FILES[row["name"]][0] and row.get("sourceUrl") == inventory.mesh_url(row["name"])}
@@ -1014,6 +1131,7 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
     report = {"schemaVersion":SCHEMA,"createdAt":datetime.now(timezone.utc).isoformat(),"exampleDataCommit":inventory.PIN,
         "gmshRequiredVersion":GMSH_VERSION,**selected,
         "optimisation":optimisation,
+        **profile,
         "attemptMode":"native-boundary-preserved-tetra-fill","status":"PREPARATION_REQUIRED","reasonCode":reason,
         "diagnostic":{"stage":progress.get("stage","worker-startup"),"component":progress.get("component"),
             "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[]),
@@ -1022,7 +1140,7 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
         "preOptimisationFaceIncidence":progress.get("preOptimisationFaceIncidence"),
         "progressJournal":progress.get("journal",[]),"sources":sources,"postAttemptSourceVerification":checks,
         "originalMeshesImmutable":all(row["immutableVerified"] for row in checks),"elapsedSeconds":round(elapsed,3),
-        "limits":{"threads":1,"maximumSeconds":MAX_SECONDS,"maximumAddressSpaceBytes":MAX_MEMORY_BYTES,"maximumOutputBytes":MAX_OUTPUT_BYTES},
+        "limits":complete_resource_limits(resource_profile) if profile else {**limits,"maximumOutputBytes":MAX_OUTPUT_BYTES},
         "coordinateUnits":"UNVERIFIED","classroomScaleAssumption":{"nativeUnitsToMetres":1,"verifiedFromSource":False},
         "files":[],"meshes":[],"volumeMeshGenerated":False,"boundaryRemeshed":False,"surfaceReparametrizationPerformed":False,
         "nativeCoordinateUnitsVerified":False,"sourceGeometryFabricated":False,"nodeWeldingPerformed":False,"topologyHealingPerformed":False,
@@ -1030,13 +1148,16 @@ def interrupted_report(destination, reason, tail, elapsed, returncode, optimisat
         "simulationExecuted":False,"mainApplicationWrites":False,"openFoamConversionVerified":False,
         "correctiveAction":"Review the retained native mesher tail and exact source-zone binding before a separate bounded retry.",
         "claimBoundary":"Interrupted meshing attempt; no complete validated volume mesh, solver case or CFD result is published."}
+    if profile and "runtimeResourceEvidence" in progress:
+        report["runtimeResourceEvidence"] = progress["runtimeResourceEvidence"]
     persist_json(destination,"remesh-report.json",report)
     return report
 
 
-def live_progress_summary(destination, tail, algorithm="hxt"):
+def live_progress_summary(destination, tail, algorithm="hxt", resource_profile="classroom"):
     """Small measured facts for the classroom Actions log, never an acceptance."""
     selected = algorithm_metadata(algorithm)
+    resource_limits(resource_profile)
     row = {}
     path = destination / "remesh-progress.json"
     if path.exists():
@@ -1047,9 +1168,11 @@ def live_progress_summary(destination, tail, algorithm="hxt"):
             raise RemeshIssue("Live progress requires the exact native progress schema.")
         if any(row.get(key) != value for key, value in selected.items()):
             raise RemeshIssue("Live native progress must match this attempt's selected algorithm.")
+        if row.get("resourceProfile", "classroom") != resource_profile:
+            raise RemeshIssue("Live native progress must match this attempt's selected resource profile.")
     measured = row.get("generatedVolumeDiagnostics") or {}
     return {"status": "NativeMeshInProgress", "stage": row.get("stage", "worker-startup"),
-            **selected,
+            **selected, **({"resourceProfile": resource_profile} if resource_profile != "classroom" else {}),
             "component": row.get("component"),
             "actualExportedVolumeCells": measured.get("exportedVolumeElementCount"),
             "nativeMinSicn": measured.get("nativeQualityMetrics", {}).get("minSICN"),
@@ -1057,9 +1180,13 @@ def live_progress_summary(destination, tail, algorithm="hxt"):
             "actualCfdRunVerified": False, "mainApplicationWrites": False}
 
 
-def supervised_run(value, optimisation_mode="full", algorithm="hxt"):
+def supervised_run(value, optimisation_mode="full", algorithm="hxt", resource_profile="classroom"):
     selected = algorithm_metadata(algorithm)
     optimisation = optimisation_metadata(optimisation_mode, algorithm)
+    profile = resource_profile_metadata(resource_profile, optimisation_mode, algorithm)
+    limits = resource_limits(resource_profile)
+    if profile:
+        extended_runner_evidence()  # Reject unavailable resources/context before output/native mutation.
     destination = checked_output(value)
     if sys.platform != "linux":
         raise RemeshIssue("Run the supervised native geometry trial only on the isolated GitHub Ubuntu worker.")
@@ -1067,16 +1194,18 @@ def supervised_run(value, optimisation_mode="full", algorithm="hxt"):
     last_live_progress = started - 30
     command = [sys.executable,"-B",str(Path(__file__).resolve()),"--native-worker","--output-dir",str(destination),
                "--algorithm",algorithm,"--optimisation-mode",optimisation_mode]
-    process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=child_environment(),
+    if profile:
+        command.extend(["--resource-profile", resource_profile])
+    process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=child_environment(resource_profile),
                                start_new_session=True,bufsize=0)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout,selectors.EVENT_READ)
     try:
         while selector.get_map():
             if time.monotonic() - last_live_progress >= 30:
-                print(json.dumps(live_progress_summary(destination, tail, algorithm), allow_nan=False), flush=True)
+                print(json.dumps(live_progress_summary(destination, tail, algorithm, resource_profile), allow_nan=False), flush=True)
                 last_live_progress = time.monotonic()
-            if not timed_out and process.poll() is None and time.monotonic()-started >= MAX_SECONDS:
+            if not timed_out and process.poll() is None and time.monotonic()-started >= limits["maximumSeconds"]:
                 timed_out = True
                 stop_owned_worker(process)
             events = selector.select(timeout=.1)
@@ -1100,10 +1229,11 @@ def supervised_run(value, optimisation_mode="full", algorithm="hxt"):
                     persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
                         **selected,"elapsedSeconds":round(time.monotonic()-started,3),
                         "optimisation":optimisation,
+                        **profile,
                         "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
                         "actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
         returncode = process.wait(timeout=3)
-        if time.monotonic()-started >= MAX_SECONDS:
+        if time.monotonic()-started >= limits["maximumSeconds"]:
             timed_out = True  # A completed process must still satisfy this attempt's wall-clock deadline.
     except BaseException:
         stop_owned_worker(process)
@@ -1116,21 +1246,26 @@ def supervised_run(value, optimisation_mode="full", algorithm="hxt"):
     persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
         **selected,"elapsedSeconds":round(time.monotonic()-started,3),
         "optimisation":optimisation,
+        **profile,
         "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
         "nativeProcessReturnCode":returncode,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
     path = destination/"remesh-report.json"
     report = None
     if not timed_out and returncode in (0,2) and path.is_file() and not path.is_symlink() and path.stat().st_size <= inventory.MAX_REPORT_BYTES:
         report = json.loads(path.read_text(encoding="utf-8"))
-        if report.get("schemaVersion") != SCHEMA or report.get("actualCfdRunVerified") is not False or report.get("mainApplicationWrites") is not False or report.get("simulationExecuted") is not False or report.get("volumeMeshGenerated") is not (returncode==0) or report.get("optimisation") != optimisation or any(report.get(key) != value for key, value in selected.items()):
+        if report.get("schemaVersion") != SCHEMA or report.get("actualCfdRunVerified") is not False or report.get("mainApplicationWrites") is not False or report.get("simulationExecuted") is not False or report.get("volumeMeshGenerated") is not (returncode==0) or report.get("optimisation") != optimisation or any(report.get(key) != value for key, value in selected.items()) or report.get("resourceProfile", "classroom") != resource_profile:
             raise RemeshIssue("Native-worker evidence must preserve the exact preparation-only claim contract.")
+        if profile and report.get("limits") != complete_resource_limits(resource_profile):
+            raise RemeshIssue("Native-worker evidence must preserve every fixed extended resource bound.")
+        if profile and report["volumeMeshGenerated"]:
+            verified_extended_runtime_evidence(report.get("runtimeResourceEvidence"))
     if report is None:
         reason = "CFD_CLASSROOM_MESH_WORKER_TIMEOUT" if timed_out else "CFD_CLASSROOM_MESH_WORKER_STOPPED"
-        report = interrupted_report(destination,reason,tail,time.monotonic()-started,returncode,optimisation_mode,algorithm)
+        report = interrupted_report(destination,reason,tail,time.monotonic()-started,returncode,optimisation_mode,algorithm,resource_profile)
     raw = path.read_bytes()
     return {"status":report["status"],"volumeMeshGenerated":report["volumeMeshGenerated"],"reportSha256":sha256(raw).hexdigest(),
         "optimisationMode":optimisation_mode,
-        **selected,
+        **selected, **profile,
         "reportBytes":len(raw),"files":report["files"],"totalGeneratedCells":sum(row["generatedCellCount"] for row in report["meshes"]),
         "actualCfdRunVerified":False,"mainApplicationWrites":False}
 
@@ -1141,9 +1276,14 @@ def main():
     parser.add_argument("--native-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--optimisation-mode", choices=OPTIMISATION_MODES, default="full")
     parser.add_argument("--algorithm", choices=tuple(ALGORITHMS), default="hxt")
+    parser.add_argument("--resource-profile", choices=RESOURCE_PROFILES, default="classroom")
     arguments = parser.parse_args()
     try:
-        result = run(arguments.output_dir, arguments.optimisation_mode, arguments.algorithm) if arguments.native_worker else supervised_run(arguments.output_dir, arguments.optimisation_mode, arguments.algorithm)
+        invoked = run if arguments.native_worker else supervised_run
+        selection = [arguments.output_dir, arguments.optimisation_mode, arguments.algorithm]
+        if arguments.resource_profile != "classroom":
+            selection.append(arguments.resource_profile)
+        result = invoked(*selection)
         print(("REMESH_WORKER_SUMMARY " if arguments.native_worker else "")+json.dumps(result, allow_nan=False),flush=True)
         return 0 if result["volumeMeshGenerated"] else 2
     except (inventory.InspectionIssue, OSError, ValueError) as error:

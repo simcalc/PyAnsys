@@ -34,6 +34,11 @@ STATIONARY = {"inblock-hub", "inblock-shroud", "volute-inlet-wall", "volute-wall
 INTERFACES = {"interface-impeller-outlet", "interface-volute-inlet"}
 PATCHES = {"impeller": {"inlet", *ROTATING, "inblock-hub", "inblock-shroud", "interface-impeller-outlet"},
            "volute": {"mass-flow-inlet-11", "volute-wall", "volute-inlet-wall", "interface-volute-inlet"}}
+EXTENDED_REMESH_PROFILE = "extended_free_hxt"
+REMESH_INVARIANT_LIMITS = {"maximumOutputBytes": 128*1024**2, "maximumReportBytes": inventory.MAX_REPORT_BYTES,
+    "maximumCellsPerComponent": 800_000, "maximumNodesPerComponent": 500_000,
+    "maximumCombinedCells": 999_999, "maximumCombinedNodes": 999_999,
+    "rawOutputBudgetChange": "128 MiB raw MSH2 ASCII trial budget; compressed publication budget is separately enforced."}
 
 
 class CaseIssue(ValueError):
@@ -61,6 +66,63 @@ def finite_number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise CaseIssue("A finite real engineering value is required.")
     return value
+
+
+def remesh_resource_limits(profile="classroom"):
+    """Exact disjoint mesher budgets; these do not change native CFD limits."""
+    if not isinstance(profile, str) or profile not in {"classroom", EXTENDED_REMESH_PROFILE}:
+        raise CaseIssue("Only the exact classroom or extended_free_hxt resource profile is supported.")
+    resource = {"threads": 1, "maximumSeconds": 900, "maximumAddressSpaceBytes": 2*1024**3} if profile == "classroom" else \
+               {"threads": 3, "maximumSeconds": 2400, "maximumAddressSpaceBytes": 8*1024**3}
+    return {**resource, **REMESH_INVARIANT_LIMITS}
+
+
+def validate_remesh_resource_profile(report):
+    """Admit an enforced named resource profile without relaxing mesh checks."""
+    profile = report.get("resourceProfile", "classroom")
+    if not isinstance(profile, str) or profile not in {"classroom", EXTENDED_REMESH_PROFILE} or ("resourceProfile" in report and profile == "classroom"):
+        raise CaseIssue("A new allocation requires the exact extended_free_hxt profile; default reports retain their original shape.")
+    limits = report.get("limits")
+    expected = remesh_resource_limits(profile)
+    if not isinstance(limits, dict) or limits != expected or any(type(limits.get(key)) is not int for key, value in expected.items() if type(value) is int):
+        raise CaseIssue("Every remeshing limit must match its exact declared resource profile and unchanged mesh/output caps.")
+    if profile == "classroom":
+        if "runtimeResourceEvidence" in report:
+            raise CaseIssue("Extended runtime evidence cannot be relabelled as a legacy default attempt.")
+        return profile
+    def full_hxt(row):
+        if not isinstance(row, dict): return False
+        options = row.get("optimisation", {})
+        return isinstance(options, dict) and row.get("algorithm") == "hxt" and type(row.get("gmshAlgorithm3D")) is int and row["gmshAlgorithm3D"] == 10 \
+            and row.get("gmshAlgorithmName") == "HXT" and options.get("mode") == "full" \
+            and type(options.get("meshOptimize")) is int and options["meshOptimize"] == 1
+    meshes = report.get("meshes")
+    boundary_flags = ("boundaryRemeshed", "surfaceReparametrizationPerformed", "sourceGeometryFabricated", "nodeWeldingPerformed", "topologyHealingPerformed")
+    if not full_hxt(report) or not isinstance(meshes, list) or len(meshes) != 2 or not all(full_hxt(row) for row in meshes) \
+       or not all(report.get(key) is False for key in boundary_flags) or \
+       not all(row.get("boundaryRemeshed") is False and row.get("surfaceReparametrizationPerformed") is False for row in meshes):
+        raise CaseIssue("extended_free_hxt admits only original-boundary full HXT10 with Mesh.Optimize=1.")
+    evidence = report.get("runtimeResourceEvidence")
+    fixed = {"publicRepository": "simcalc/PyAnsys", "manualWorkflowContextVerified": True,
+        "runnerEnvironment": "github-hosted", "runnerOs": "Linux", "minimumCpuCount": 4,
+        "minimumPhysicalMemoryBytes": 14*1024**3, "paidFallback": False, "customRunnerAllowed": False,
+        "basis": "Actual os.cpu_count and bounded procfs MemTotal; repository public verification is performed by the workflow guard.",
+        "addressSpaceSoftLimitBytes": 8*1024**3, "addressSpaceHardLimitBytes": 8*1024**3,
+        "workerOpenMpThreads": 3, "workerBlasThreads": {"OPENBLAS_NUM_THREADS": 1, "MKL_NUM_THREADS": 1, "NUMEXPR_NUM_THREADS": 1},
+        "nativeThreadOptions": {"General.NumThreads": 3, "Mesh.MaxNumThreads1D": 3, "Mesh.MaxNumThreads2D": 3, "Mesh.MaxNumThreads3D": 3}}
+    if not isinstance(evidence, dict) or set(evidence) != set(fixed) | {"availableCpuCount", "physicalMemoryBytes"}:
+        raise CaseIssue("The extended profile needs complete measured public-host runtime resource evidence.")
+    for key, value in fixed.items():
+        actual = evidence[key]
+        if actual != value or (type(value) in (int, bool, str) and type(actual) is not type(value)):
+            raise CaseIssue("Actual extended resource enforcement/context differs: " + key)
+    if any(type(value) is not int or value != 1 for value in evidence["workerBlasThreads"].values()) or \
+       any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value != 3 for value in evidence["nativeThreadOptions"].values()):
+        raise CaseIssue("Read back exactly three native thread limits and one BLAS thread; utilization is not inferred.")
+    if any(type(evidence[key]) is not int or not minimum <= evidence[key] <= maximum for key, minimum, maximum in (
+            ("availableCpuCount", 4, 4096), ("physicalMemoryBytes", 14*1024**3, 1024**5))):
+        raise CaseIssue("Measured hosted hardware must meet the exact finite CPU and physical-memory capacity bounds.")
+    return profile
 
 
 def msh_inventory(raw):
@@ -150,6 +212,7 @@ def validate_inputs(directory):
                           "simulationExecuted": False, "actualCfdRunVerified": False, "mainApplicationWrites": False}.items():
         if report.get(key) != expected:
             raise CaseIssue("An actual successful source-pinned remeshing report is required: " + key)
+    validate_remesh_resource_profile(report)
     assumption = report.get("classroomScaleAssumption", {})
     if assumption.get("nativeUnitsToMetres") != 1 or assumption.get("verifiedFromSource") is not False:
         raise CaseIssue("Preserve the explicitly unverified one-unit-to-one-metre classroom assumption.")
