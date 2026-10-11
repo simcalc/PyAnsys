@@ -173,6 +173,58 @@ class RemeshContracts(unittest.TestCase):
         self.assertNotIn("CFD_LICENSE_TOKEN",environment)
         self.assertNotIn("SECRET_PRIVATE",environment)
 
+    def test_unoptimised_native_setting_changes_only_the_optimisation_flag(self):
+        full=remesh.volume_mesh_options(1/32)
+        unoptimised=remesh.volume_mesh_options(1/32,"unoptimised")
+        self.assertEqual(full["Mesh.Optimize"],1)
+        self.assertEqual(unoptimised["Mesh.Optimize"],0)
+        self.assertEqual({key:value for key,value in full.items() if key!="Mesh.Optimize"},
+                         {key:value for key,value in unoptimised.items() if key!="Mesh.Optimize"})
+        self.assertEqual(full["Mesh.Algorithm3D"],10)
+        self.assertEqual(full["Mesh.MeshOnlyEmpty"],1)
+        for mode in remesh.OPTIMISATION_MODES:
+            metadata=remesh.optimisation_metadata(mode)
+            self.assertEqual(metadata["hxtDefaultQualityTarget"],.3)
+            self.assertFalse(metadata["targetIsMeasuredMinSICN"])
+            self.assertFalse(metadata["optimisationSuccessVerified"])
+        for invalid in ("auto","none",None,True):
+            with TemporaryDirectory() as root,patch.object(remesh,"enforce_runtime_limits") as invoked:
+                target=Path(root)/"invalid-mode"
+                with self.subTest(mode=invalid),self.assertRaises(remesh.RemeshIssue):
+                    remesh.run(target,invalid)
+                self.assertFalse(target.exists())
+                invoked.assert_not_called()
+
+    def test_unoptimised_fill_still_checks_every_cell_and_preserves_native_boundary(self):
+        # Inert API adapter with one synthetic tetrahedron; no Gmsh/native run.
+        options={}
+        class Mesh:
+            def addNodes(self,*args): pass
+            def addElementsByType(self,*args): pass
+            def reclassifyNodes(self): pass
+            def createTopology(self,**kwargs): pass
+            def getNodes(self): return list(POINTS),[x for point in POINTS.values() for x in point],[]
+            def generate(self,dimension): self.generated=dimension
+            def getElements(self,dimension,entity):
+                if dimension==3: return [4],[[100]],[[1,2,3,4]]
+                faces=FACES[:2] if entity==11 else FACES[2:]
+                return [2],[[1,2]],[[node for face in faces for node in face]]
+            def getElementQualities(self,tags,quantity): return [0.]  # Actual gate must reject.
+        mesh=Mesh()
+        gmsh=SimpleNamespace(option=SimpleNamespace(setNumber=lambda key,value:options.update({key:value})),
+            model=SimpleNamespace(mesh=mesh,add=lambda *args:None,addDiscreteEntity=lambda *args:None,
+                getEntities=lambda dim:[(2,11),(2,12)],addPhysicalGroup=lambda *args:None,setPhysicalName=lambda *args:None,
+                geo=SimpleNamespace(addSurfaceLoop=lambda *args:1,addVolume=lambda *args:1,synchronize=lambda:None)))
+        model=self.model();model["nativeCounts"]={"cellCount":2,"nodeCount":4}
+        progress={"optimisationMode":"unoptimised"}
+        with TemporaryDirectory() as root,patch.object(remesh,"checkpoint") as checkpoint:
+            with self.assertRaisesRegex(remesh.RemeshIssue,"Every generated cell"):
+                remesh.remesh_component(model,"impeller.msh.h5",Path(root),gmsh,None,progress)
+            self.assertEqual(options,remesh.volume_mesh_options(1/32,"unoptimised"))
+            self.assertEqual(mesh.generated,3)
+            self.assertIn("quality-and-preserved-boundary-equality",[call.args[1] for call in checkpoint.call_args_list])
+            self.assertFalse((Path(root)/"impeller.msh").exists())
+
     def test_interrupted_native_worker_report_removes_partial_mesh_and_never_claims_cfd(self):
         with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
             target=Path(root)/"trial"
@@ -223,7 +275,8 @@ class RemeshContracts(unittest.TestCase):
             def launched(*arguments,**options):
                 target.mkdir()
                 remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"PREPARATION_REQUIRED",
-                    "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,"files":[],"meshes":[]})
+                    "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,"files":[],"meshes":[],
+                    "optimisation":remesh.optimisation_metadata("full")})
                 return Process()
             with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched) as launch,\
                  patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",side_effect=chunks):
@@ -236,6 +289,7 @@ class RemeshContracts(unittest.TestCase):
             self.assertFalse(summary["volumeMeshGenerated"])
             self.assertEqual(launch.call_args.args[0][2],str(TOOL.resolve()))
             self.assertIn("--native-worker",launch.call_args.args[0])
+            self.assertEqual(launch.call_args.args[0][-2:],["--optimisation-mode","full"])
             self.assertTrue(launch.call_args.kwargs["start_new_session"])
 
     def test_supervisor_timeout_stops_owned_worker_and_persists_diagnostic_with_source_hashes(self):
@@ -290,6 +344,44 @@ class RemeshContracts(unittest.TestCase):
             self.assertFalse(summary["volumeMeshGenerated"])
             self.assertEqual(summary["files"],[])
             self.assertFalse((target/"impeller.msh").exists())
+
+    def test_supervisor_passes_unoptimised_mode_and_rejects_a_different_worker_mode(self):
+        class Stream:
+            def fileno(self): return 123
+            def close(self): pass
+        class Process:
+            stdout=Stream()
+            def poll(self): return 2
+            def wait(self,timeout): return 2
+        class Selector:
+            active=True
+            def register(self,file,event): self.file=file
+            def get_map(self): return {1:True} if self.active else {}
+            def select(self,timeout): return [(SimpleNamespace(fileobj=self.file),None)]
+            def unregister(self,file): self.active=False
+            def close(self): pass
+        for worker_mode in ("unoptimised","full"):
+            with TemporaryDirectory() as root,patch.dict(os.environ,{"RUNNER_TEMP":root},clear=False):
+                target=Path(root)/"unoptimised-trial"
+                def launched(*arguments,**options):
+                    target.mkdir()
+                    remesh.persist_json(target,"remesh-report.json",{"schemaVersion":remesh.SCHEMA,"status":"PREPARATION_REQUIRED",
+                        "volumeMeshGenerated":False,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False,
+                        "files":[],"meshes":[],"optimisation":remesh.optimisation_metadata(worker_mode)})
+                    return Process()
+                with patch.object(remesh.sys,"platform","linux"),patch.object(remesh.subprocess,"Popen",side_effect=launched) as launch,\
+                     patch.object(remesh.selectors,"DefaultSelector",return_value=Selector()),patch.object(remesh.os,"read",return_value=b""):
+                    if worker_mode=="full":
+                        with self.assertRaisesRegex(remesh.RemeshIssue,"claim contract"):
+                            remesh.supervised_run(target,"unoptimised")
+                    else:
+                        summary=remesh.supervised_run(target,"unoptimised")
+                        self.assertEqual(summary["optimisationMode"],"unoptimised")
+                        self.assertFalse(summary["volumeMeshGenerated"])
+                    self.assertEqual(launch.call_args.args[0][-2:],["--optimisation-mode","unoptimised"])
+                retained=json.loads((target/"gmsh-native-tail.json").read_text())
+                self.assertEqual(retained["optimisation"]["mode"],"unoptimised")
+                self.assertFalse(retained["optimisation"]["optimisationSuccessVerified"])
 
     def test_supervisor_rejects_completed_worker_evidence_past_wall_clock_deadline(self):
         class Stream:

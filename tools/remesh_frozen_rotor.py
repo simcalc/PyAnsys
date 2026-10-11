@@ -36,6 +36,8 @@ MAX_COMBINED_CELLS = 999_999
 MAX_COMBINED_NODES = 999_999
 MAX_CLASSIFIED_SURFACES = 512
 GMSH_ALGORITHM_3D = 10  # HXT: efficient Delaunay implementation; exact facets stay fixed.
+OPTIMISATION_MODES = ("full", "unoptimised")
+HXT_DEFAULT_QUALITY_TARGET = .3  # Native HXT optimisation target, not measured minSICN.
 NATIVE_TAIL_LINES = 24
 NATIVE_LINE_CHARACTERS = 240
 CHILD_ENVIRONMENT_KEYS = ("PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "RUNNER_OS",
@@ -50,6 +52,25 @@ REFERENCES = ["https://gmsh.info/doc/texinfo/gmsh.html#t13",
 
 class RemeshIssue(inventory.InspectionIssue):
     pass
+
+
+def optimisation_metadata(mode):
+    if mode not in OPTIMISATION_MODES:
+        raise RemeshIssue("Choose explicit HXT optimisation mode full or unoptimised.")
+    return {"mode": mode, "meshOptimize": int(mode == "full"),
+            "hxtDefaultQualityTarget": HXT_DEFAULT_QUALITY_TARGET,
+            "targetBasis": "Pinned Gmsh 4.15.2 native HXT optimisation default; no target override.",
+            "targetIsMeasuredMinSICN": False, "optimisationSuccessVerified": False,
+            "claimBoundary": "Requested native optimisation setting only. Actual every-cell quality and independent OpenFOAM checkMesh acceptance remain separate."}
+
+
+def volume_mesh_options(size, mode="full"):
+    optimisation = optimisation_metadata(mode)
+    return {"Mesh.MeshSizeMin": size, "Mesh.MeshSizeMax": size, "Mesh.MeshSizeFromPoints": 0,
+            "Mesh.MeshSizeFromCurvature": 0, "Mesh.MeshSizeExtendFromBoundary": 0,
+            "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": GMSH_ALGORITHM_3D, "Mesh.ElementOrder": 1,
+            "Mesh.MshFileVersion": 2.2, "Mesh.Binary": 0, "Mesh.SaveAll": 0,
+            "Mesh.Optimize": optimisation["meshOptimize"]}
 
 
 def persist_json(destination, name, value):
@@ -157,6 +178,7 @@ def checkpoint(progress, stage):
              "component": progress.get("component"), "journal": journal,
              "surfaceZoneBindings": progress.get("surfaceZoneBindings", []),
              "verifiedSources": progress.get("verifiedSources", []), "gmshAlgorithm3D": GMSH_ALGORITHM_3D,
+             "optimisation": optimisation_metadata(progress.get("optimisationMode", "full")),
              "actualCfdRunVerified": False, "simulationExecuted": False, "mainApplicationWrites": False}
     persist_json(progress["destination"], "remesh-progress.json", value)
 
@@ -303,6 +325,7 @@ def _quality(gmsh, cell_tags):
 
 
 def remesh_component(model, name, destination, gmsh, np, progress):
+    optimisation = optimisation_metadata(progress.get("optimisationMode", "full"))
     component = name.split(".")[0]
     progress["component"] = component
     progress["surfaceZoneBindings"] = []
@@ -343,10 +366,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
         gmsh.model.setPhysicalName(2, zone["zoneId"], zone["zoneName"])
     gmsh.model.addPhysicalGroup(3, [volume], 1)
     gmsh.model.setPhysicalName(3, 1, "rotating-fluid" if component == "impeller" else "stationary-fluid")
-    for option, value in {"Mesh.MeshSizeMin": size, "Mesh.MeshSizeMax": size, "Mesh.MeshSizeFromPoints": 0,
-                          "Mesh.MeshSizeFromCurvature": 0, "Mesh.MeshSizeExtendFromBoundary": 0,
-                          "Mesh.MeshOnlyEmpty": 1, "Mesh.Algorithm3D": GMSH_ALGORITHM_3D, "Mesh.ElementOrder": 1,
-                          "Mesh.MshFileVersion": 2.2, "Mesh.Binary": 0, "Mesh.SaveAll": 0}.items():
+    for option, value in volume_mesh_options(size, optimisation["mode"]).items():
         gmsh.option.setNumber(option, value)
     checkpoint(progress, "fixed-boundary-tetrahedral-fill")
     gmsh.model.mesh.generate(3)
@@ -404,6 +424,7 @@ def remesh_component(model, name, destination, gmsh, np, progress):
               "boundaryRemeshed": False, "surfaceReparametrizationPerformed": False,
               "sourceBoundaryBoundsAssumedM": native_box, "generatedBoundsAssumedM": bounds(list(points.values())),
               "cellMetrics": metrics, "gmshQuality": quality, "boundaryZones": boundary_rows,
+              "optimisation": optimisation,
               "volumePhysicalGroup": "rotating-fluid" if component == "impeller" else "stationary-fluid",
               "equationStages": [{"input": {"sourceBoundaryBoundsNative": native_box, "sizingDivisor": SIZING_DIVISOR, "assumedMetresPerNativeUnit": 1},
                   "equation": "h_trial = max(xmax-xmin, ymax-ymin, zmax-zmin) / 32",
@@ -428,16 +449,19 @@ def enforce_runtime_limits():
     signal.alarm(MAX_SECONDS)
 
 
-def run(value):
+def run(value, optimisation_mode="full"):
+    optimisation = optimisation_metadata(optimisation_mode)
     destination = checked_output(value)
     started = time.monotonic()
-    progress = {"component": None, "stage": "runtime-preflight", "started": started, "destination": destination}
+    progress = {"component": None, "stage": "runtime-preflight", "started": started, "destination": destination,
+                "optimisationMode": optimisation_mode}
     destination.mkdir(parents=True)
     checkpoint(progress, "runtime-preflight")
     cache = destination.parent / "frozen-rotor-mesh-inputs"
     report = {"schemaVersion": SCHEMA, "createdAt": datetime.now(timezone.utc).isoformat(),
               "attemptMode": "native-boundary-preserved-tetra-fill", "boundaryRemeshed": False,
               "gmshAlgorithm3D": GMSH_ALGORITHM_3D, "gmshAlgorithmName": "HXT",
+              "optimisation": optimisation,
               "algorithmChangeBasis": "The previous Delaunay1 fixed-boundary attempt reached its 300-second limit. HXT10 is the documented efficient Delaunay implementation; no geometry or source-identity gate is relaxed. Actual HXT run38160027289 progressed through refinement into GSC optimisation at the 300-second limit; this separate attempt permits 900 seconds of bounded native work.",
               "surfaceReparametrizationPerformed": False,
               "exampleDataCommit": inventory.PIN, "gmshRequiredVersion": GMSH_VERSION, "references": REFERENCES,
@@ -539,6 +563,7 @@ def run(value):
     with (destination / "remesh-report.json").open("xb") as stream:
         stream.write(raw)
     return {"status": report["status"], "stage": progress["stage"], "volumeMeshGenerated": report["volumeMeshGenerated"],
+            "optimisationMode": optimisation_mode,
             "reportSha256": sha256(raw).hexdigest(), "reportBytes": len(raw), "files": report["files"],
             "totalGeneratedCells": sum(mesh["generatedCellCount"] for mesh in report["meshes"]),
             "actualCfdRunVerified": False, "mainApplicationWrites": False}
@@ -565,8 +590,9 @@ def stop_owned_worker(process):
         process.wait(timeout=3)
 
 
-def interrupted_report(destination, reason, tail, elapsed, returncode):
+def interrupted_report(destination, reason, tail, elapsed, returncode, optimisation_mode="full"):
     """Recover factual progress and hashes after owned native-worker interruption."""
+    optimisation = optimisation_metadata(optimisation_mode)
     progress = {}
     path = destination/"remesh-progress.json"
     if path.is_file() and not path.is_symlink() and path.stat().st_size <= inventory.MAX_REPORT_BYTES:
@@ -589,6 +615,7 @@ def interrupted_report(destination, reason, tail, elapsed, returncode):
             target.unlink()  # Only outputs owned by this fresh isolated attempt.
     report = {"schemaVersion":SCHEMA,"createdAt":datetime.now(timezone.utc).isoformat(),"exampleDataCommit":inventory.PIN,
         "gmshRequiredVersion":GMSH_VERSION,"gmshAlgorithm3D":GMSH_ALGORITHM_3D,"gmshAlgorithmName":"HXT",
+        "optimisation":optimisation,
         "attemptMode":"native-boundary-preserved-tetra-fill","status":"PREPARATION_REQUIRED","reasonCode":reason,
         "diagnostic":{"stage":progress.get("stage","worker-startup"),"component":progress.get("component"),
             "nativeProcessReturnCode":returncode,"loggerTail":list(tail),"surfaceZoneBindings":progress.get("surfaceZoneBindings",[])},
@@ -606,12 +633,14 @@ def interrupted_report(destination, reason, tail, elapsed, returncode):
     return report
 
 
-def supervised_run(value):
+def supervised_run(value, optimisation_mode="full"):
+    optimisation = optimisation_metadata(optimisation_mode)
     destination = checked_output(value)
     if sys.platform != "linux":
         raise RemeshIssue("Run the supervised native geometry trial only on the isolated GitHub Ubuntu worker.")
     started, tail, pending, received, timed_out = time.monotonic(), deque(maxlen=NATIVE_TAIL_LINES), b"", 0, False
-    command = [sys.executable,"-B",str(Path(__file__).resolve()),"--native-worker","--output-dir",str(destination)]
+    command = [sys.executable,"-B",str(Path(__file__).resolve()),"--native-worker","--output-dir",str(destination),
+               "--optimisation-mode",optimisation_mode]
     process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=child_environment(),
                                start_new_session=True,bufsize=0)
     selector = selectors.DefaultSelector()
@@ -641,6 +670,7 @@ def supervised_run(value):
                 if destination.is_dir():
                     persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
                         "gmshAlgorithm3D":GMSH_ALGORITHM_3D,"elapsedSeconds":round(time.monotonic()-started,3),
+                        "optimisation":optimisation,
                         "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
                         "actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
         returncode = process.wait(timeout=3)
@@ -656,19 +686,21 @@ def supervised_run(value):
         destination.mkdir(parents=True)
     persist_json(destination,"gmsh-native-tail.json",{"schemaVersion":"untirta.gmsh-native-tail.v1",
         "gmshAlgorithm3D":GMSH_ALGORITHM_3D,"elapsedSeconds":round(time.monotonic()-started,3),
+        "optimisation":optimisation,
         "receivedNativeLineCount":received,"lines":list(tail),"nativeWorkerTimedOut":timed_out,
         "nativeProcessReturnCode":returncode,"actualCfdRunVerified":False,"simulationExecuted":False,"mainApplicationWrites":False})
     path = destination/"remesh-report.json"
     report = None
     if not timed_out and returncode in (0,2) and path.is_file() and not path.is_symlink() and path.stat().st_size <= inventory.MAX_REPORT_BYTES:
         report = json.loads(path.read_text(encoding="utf-8"))
-        if report.get("schemaVersion") != SCHEMA or report.get("actualCfdRunVerified") is not False or report.get("mainApplicationWrites") is not False or report.get("simulationExecuted") is not False or report.get("volumeMeshGenerated") is not (returncode==0):
+        if report.get("schemaVersion") != SCHEMA or report.get("actualCfdRunVerified") is not False or report.get("mainApplicationWrites") is not False or report.get("simulationExecuted") is not False or report.get("volumeMeshGenerated") is not (returncode==0) or report.get("optimisation") != optimisation:
             raise RemeshIssue("Native-worker evidence must preserve the exact preparation-only claim contract.")
     if report is None:
         reason = "CFD_CLASSROOM_MESH_WORKER_TIMEOUT" if timed_out else "CFD_CLASSROOM_MESH_WORKER_STOPPED"
-        report = interrupted_report(destination,reason,tail,time.monotonic()-started,returncode)
+        report = interrupted_report(destination,reason,tail,time.monotonic()-started,returncode,optimisation_mode)
     raw = path.read_bytes()
     return {"status":report["status"],"volumeMeshGenerated":report["volumeMeshGenerated"],"reportSha256":sha256(raw).hexdigest(),
+        "optimisationMode":optimisation_mode,
         "reportBytes":len(raw),"files":report["files"],"totalGeneratedCells":sum(row["generatedCellCount"] for row in report["meshes"]),
         "actualCfdRunVerified":False,"mainApplicationWrites":False}
 
@@ -677,9 +709,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--native-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--optimisation-mode", choices=OPTIMISATION_MODES, default="full")
     arguments = parser.parse_args()
     try:
-        result = run(arguments.output_dir) if arguments.native_worker else supervised_run(arguments.output_dir)
+        result = run(arguments.output_dir, arguments.optimisation_mode) if arguments.native_worker else supervised_run(arguments.output_dir, arguments.optimisation_mode)
         print(("REMESH_WORKER_SUMMARY " if arguments.native_worker else "")+json.dumps(result, allow_nan=False),flush=True)
         return 0 if result["volumeMeshGenerated"] else 2
     except (inventory.InspectionIssue, OSError, ValueError) as error:
