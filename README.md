@@ -696,3 +696,29 @@ checks passed independently. The volute, coupled interface and MRF solve were
 not executed. Native logs, primitive mesh, selection maps and failed-cell sets
 are retained for geometric diagnosis. The conditional active-phase workflow
 has not been executed and cannot use this failed trial as its source.
+
+### Reuse of an independently accepted native HXT volume
+
+The manual `Frozen Rotor fresh MRF from independently reverified HXT volume`
+workflow is a conditional route for the extended HXT trial. It requires the
+exact pinned public source commit, completed run, successful native volume
+step and one unexpired artifact. A downstream failure does not revoke an
+independently valid volume, and does not qualify any baseline or phase result.
+
+The complete raw artifact must match its actual GitHub size and SHA-256 before
+safe extraction of the two MSH files and their original remeshing report.
+Current readers replay tetrahedral connectivity and the exact pinned source
+coordinates, oriented boundary triangles and eleven physical patch roles.
+Source and transferred bytes remain unchanged. Transfer is bounded to one
+CPU, 4 GiB and 300 seconds; it launches no mesh generator or flow solver.
+
+Only an accepted replay can start fresh conversion, full native mesh and NCC
+checks, and steady SST/MRF. This new solve retains the separate one-CPU,
+2-GiB, 1200-second and 512-MiB limits. Its declared inlet reference is
+**101325 Pa absolute**, with the original water, speed, flow and gravity
+assumptions. No old solution fields or head values are inherited.
+Workflow success requires the independent numerical baseline reducer to pass.
+Phase admission still requires this new successful baseline run and its own
+bound evidence, followed by an actual qualified active-phase reference.
+Preparing or testing this route does not establish accepted mesh, CFD, NPSHr,
+transient, restart or convergence results. Main files and ports are unchanged.

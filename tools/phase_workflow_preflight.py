@@ -14,6 +14,7 @@ REPOSITORY = 'simcalc/PyAnsys'
 SOURCE_WORKFLOWS = {
     '.github/workflows/remesh-frozen-rotor.yml': 'frozen-rotor-remesh-',
     '.github/workflows/remesh-extended-free-frozen-rotor.yml': 'frozen-rotor-extended-free-hxt-',
+    '.github/workflows/reuse-volume-frozen-rotor.yml': 'frozen-rotor-reused-volume-baseline-',
     '.github/workflows/original-frozen-rotor.yml': 'frozen-rotor-original-',
 }
 # One source artifact retains the bounded native ZIP (128 MiB), separate mesh

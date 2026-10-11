@@ -58,6 +58,22 @@ class AdmissionContracts(unittest.TestCase):
             wrong={'artifacts':[{**artifacts['artifacts'][0],'name':name}]}
             with self.subTest(name=name),self.assertRaises(ValueError):tool.validate_source(self.inputs(),run,wrong)
 
+    def test_reused_volume_requires_its_own_successful_baseline_run(self):
+        run, artifacts = self.fixture()
+        run['path'] = '.github/workflows/reuse-volume-frozen-rotor.yml'
+        artifacts['artifacts'][0]['name'] = 'frozen-rotor-reused-volume-baseline-123456789'
+        accepted = tool.validate_source(self.inputs(), run, artifacts)
+        self.assertEqual(accepted['artifactName'], artifacts['artifacts'][0]['name'])
+        self.assertFalse(accepted['sourceBaselineQualified'])
+        self.assertFalse(accepted['actualCfdRunVerified'])
+        for changed in ({**run, 'conclusion': 'failure'}, {**run, 'status': 'in_progress'},
+                        {**run, 'path': '.github/workflows/reuse-volume-frozen-rotor-copy.yml'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                tool.validate_source(self.inputs(), changed, artifacts)
+        artifacts['artifacts'][0]['name'] = 'frozen-rotor-extended-free-hxt-123456789'
+        with self.assertRaises(ValueError):
+            tool.validate_source(self.inputs(), run, artifacts)
+
     def test_untrusted_input_values_and_physical_time_bounds_rejected(self):
         for field, value in [('BASELINE_RUN_ID', '../Main'), ('BASELINE_RUN_ID', '0'),
                              ('PHASE_MODE', 'run arbitrary'), ('PRESSURE_ABSOLUTE_PA', 'nan'),
