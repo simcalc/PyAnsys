@@ -4,6 +4,7 @@ from hashlib import sha256
 import importlib.util
 import io
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -30,6 +31,73 @@ def write_points(path, values):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(runner.preparation.base.foam_header("points", "vectorField") + str(len(values)) + "\n(\n"
                     + "\n".join("(" + " ".join(str(v) for v in row) + ")" for row in values) + "\n)\n", encoding="ascii")
+
+
+MOTION_POINTS=((1,0,0),(2,0,0),(1,1,0),(1,0,1),(4,0,0),(5,0,0),(4,1,0),(4,0,1))
+
+
+def motion_mesh_files(point_order=None):
+    """Minimal independent labelled rotor/stator volumes, synthetic not CFD."""
+    base=runner.preparation.base
+    order=tuple(range(8)) if point_order is None else point_order;inverse={old:new for new,old in enumerate(order)}
+    faces=((0,2,1),(0,1,3),(1,2,3),(2,0,3),(4,6,5),(4,5,7),(5,6,7),(6,4,7))
+    contents={"faces":('faceList','8\n('+' '.join('3('+' '.join(str(inverse[v]) for v in f)+')' for f in faces)+')\n'),
+              "owner":('labelList','8\n(0 0 0 0 1 1 1 1)\n'),"neighbour":('labelList','0\n()\n'),
+              "boundary":('polyBoundaryMesh','2\n(inlet {type patch; nFaces 4; startFace 0;} outlet {type patch; nFaces 4; startFace 4;})\n'),
+              "cellZones":('cellZoneList','2\n(rotating-fluid {type cellZone; cellLabels List<label> 1(0);}\nstationary-fluid {type cellZone; cellLabels List<label> 1(1);})\n')}
+    contents['points']=('vectorField','8\n(\n'+'\n'.join('('+' '.join(str(v) for v in MOTION_POINTS[i])+')' for i in order)+'\n)\n')
+    return {name:base.foam_header(name,kind)+body for name,(kind,body) in contents.items()}
+
+
+def motion_fixture(root, *, stage4=False, start=0., point_order=None):
+    """Two labelled synthetic tetrahedra; this is not native CFD evidence."""
+    original=MOTION_POINTS if point_order is None else tuple(MOTION_POINTS[i] for i in point_order);base=runner.preparation.base
+    mesh_path=root/'case/constant/polyMesh';mesh_path.mkdir(parents=True)
+    for name,content in motion_mesh_files(point_order).items():(mesh_path/name).write_bytes(content.encode('ascii'))
+    study=runner.preparation.protocol.prepare_study();end=.15;dt=60/study['input']['speedRpm']/360
+    files=runner.preparation.native_recipe(study,300000,"transient-sliding",dt,end)
+    files['system/controlDict']=files['system/controlDict'].replace('startTime 0;','startTime '+format(start,'.17g')+';')
+    def record(relative):
+        raw=(root/relative).read_bytes();return {'path':relative,'bytes':len(raw),'sha256':sha256(raw).hexdigest()}
+    authored=[]
+    for name in ('constant/dynamicMeshDict','system/controlDict'):
+        path=root/'case'/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(files[name].encode('ascii'));authored.append({**record('case/'+name),'path':name})
+    meshes=[{**record('case/constant/polyMesh/'+name),'path':'constant/polyMesh/'+name} for name in sorted(runner.preparation.MESH_FILES)]
+    geometry={'schemaVersion':'untirta.frozen-rotor-fixed-geometry-identity.v1','exampleDataCommit':base.inventory.PIN,
+              'fixtureKind':'SYNTHETIC-UNIT-TEST-NOT-CFD','mainApplicationWrites':False}
+    (root/'geometry-identity.json').write_bytes(runner.preparation.canonical(geometry));g=record('geometry-identity.json')
+    prep_name='stage4-branch-preparation.json' if stage4 else 'phase-change-preparation.json'
+    manifest_name='stage4-input-manifest.json' if stage4 else 'phase-input-manifest.json'
+    study_name='stage4-classroom-study.json' if stage4 else 'phase-classroom-study.json'
+    prep={'schemaVersion':'untirta.frozen-rotor-stage4-branch-preparation.v1' if stage4 else runner.preparation.SCHEMA,
+          'mainApplicationWrites':False,'declaredStudyInputs':study['input'],'physicalBasis':study['physicalBasis'],
+          'sourceGeometryIdentityFile':g,'sourceGeometryControlSha256':sha256(runner.preparation.canonical([g])).hexdigest(),
+          'authoredInputFiles':authored,'referenceMeshFiles' if stage4 else 'preservedNativeMeshFiles':meshes}
+    if start>0:
+        initial_path='case/'+format(start,'.17g')+'/polyMesh/points'
+        write_points(root/initial_path,moved_points(original,start))
+        checkpoint_files=[record(initial_path)];checkpoint_sha=sha256(runner.preparation.canonical(checkpoint_files)).hexdigest()
+        checkpoint={'schemaVersion':'untirta.frozen-rotor-stage4-native-checkpoint.v1','physicalTimeS':start,
+                    'files':checkpoint_files,'checkpointSha256':checkpoint_sha,'mainApplicationWrites':False,
+                    'fixtureKind':'SYNTHETIC-MOTION-CHECKPOINT-ONLY-NOT-CFD-STATE'}
+        (root/'stage4-checkpoint.json').write_bytes(runner.preparation.canonical(checkpoint));prep['resumeCheckpointSha256']=checkpoint_sha
+    (root/prep_name).write_bytes(runner.preparation.canonical(prep))
+    allrows=[record(prep_name),g]+[{**r,'path':'case/'+r['path']} for r in meshes+authored]
+    manifest={'schemaVersion':'untirta.frozen-rotor-stage4-input-manifest.v1' if stage4 else 'untirta.frozen-rotor-phase-input-manifest.v1',
+              'mode':'transient-sliding','studyInputs':study['input'],'physicalBasis':study['physicalBasis'],
+              'preparationReportSha256':record(prep_name)['sha256'],'files':allrows,
+              'temporalPlan':{'initialTimeS':start,'endTimeS':end,'rotationPeriodS':60/study['input']['speedRpm']}}
+    (root/manifest_name).write_bytes(runner.preparation.canonical(manifest));(root/study_name).write_bytes(runner.preparation.canonical(study))
+    return original,study,prep_name,manifest_name
+
+
+def moved_points(original,time_s,rpm=1450):
+    angle=2*math.pi*rpm*time_s/60;c,s=math.cos(angle),math.sin(angle)
+    return tuple((c*x-s*y,s*x+c*y,z) if i<4 else (x,y,z) for i,(x,y,z) in enumerate(original))
+
+
+def motion_log(*times):
+    return 'Selecting solidBodyMotionFunction rotatingMotion\n'+''.join('Time = '+format(t,'.17g')+'s\n' for t in times)
 
 
 class MockStream:
@@ -121,19 +189,137 @@ class PhaseFieldContracts(unittest.TestCase):
 
     def test_sliding_requires_actual_nonroundoff_motion_not_only_dictionary_or_log(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); source = root / "case/constant/polyMesh/points"
-            original = ((0, 0, 0), (1, 0, 0), (0, 1, 1)); write_points(source, original)
-            endpoint = root / "case/0.3"; write_points(endpoint / "polyMesh/points", original)
-            log = "Selecting solidBodyMotionFunction rotatingMotion\n"
+            root = Path(temp); original,_,_,_=motion_fixture(root);time_s=.03
+            endpoint = root / "case/0.03"; write_points(endpoint / "polyMesh/points", original)
+            log = motion_log(time_s)
             with self.assertRaises(runner.PhaseExecutionIssue):
-                runner.rotor_motion(root, [(.3, endpoint)], log)
-            write_points(endpoint / "polyMesh/points", ((0, 0, 0), (0, 1, 0), (-1, 0, 1)))
-            row = runner.rotor_motion(root, [(.3, endpoint)], log)
+                runner.rotor_motion(root, [(time_s, endpoint)], log)
+            write_points(endpoint / "polyMesh/points", moved_points(original,time_s))
+            row = runner.rotor_motion(root, [(time_s, endpoint)], log)
             self.assertTrue(row["nativeMovedPointsObserved"])
+            self.assertTrue(row['rigidRotorMotionVerified']);self.assertTrue(row['stationaryPointIdentityVerified'])
+            self.assertEqual((row['rotorPointCount'],row['statorPointCount']),(4,4))
             self.assertFalse(row["periodicTransientQualified"])
             self.assertFalse(row["nativeCoordinateUnitsVerified"])
+            self.assertFalse(row['actualWallVelocityChecked']);self.assertFalse(row['actualMeshFluxChecked']);self.assertFalse(row['fullStateRestartVerified'])
             with self.assertRaises(runner.PhaseExecutionIssue):
-                runner.rotor_motion(root, [(.3, endpoint)], "motion configured but not selected")
+                runner.rotor_motion(root, [(time_s, endpoint)], "motion configured but not selected")
+
+    def test_wrong_axis_direction_double_rotation_stator_drift_and_missing_motion_reject(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,_,_=motion_fixture(root);t=.03;endpoint=root/'case/0.03'
+            correct=moved_points(original,t)
+            wrong_axis=tuple((x,math.cos(2*math.pi*1450*t/60)*y-math.sin(2*math.pi*1450*t/60)*z,math.sin(2*math.pi*1450*t/60)*y+math.cos(2*math.pi*1450*t/60)*z) if i<4 else (x,y,z) for i,(x,y,z) in enumerate(original))
+            drift=list(correct);drift[4]=(correct[4][0]+1e-4,*correct[4][1:])
+            for values in (wrong_axis,moved_points(original,-t),moved_points(original,2*t),drift,original):
+                write_points(endpoint/'polyMesh/points',values)
+                with self.assertRaisesRegex(runner.PhaseExecutionIssue,'rotor/stator|moved points'):
+                    runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+            (endpoint/'polyMesh/points').unlink()
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'actual moved-point'):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_restart_uses_global_noninteger_phase_and_retains_original_reference_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,_,_=motion_fixture(root,stage4=True,start=.02);t=.03;endpoint=root/'case/0.03'
+            source=root/'case/constant/polyMesh/points';before=source.read_bytes()
+            write_points(endpoint/'polyMesh/points',moved_points(original,t))
+            initial=root/'case'/format(.02,'.17g')
+            result=runner.rotor_motion(root,[(.02,initial),(t,endpoint)],motion_log(t))
+            self.assertAlmostEqual(result['nativeMovedPointRecords'][-1]['rotationAngleRad'],2*math.pi*1450*t/60)
+            self.assertEqual(source.read_bytes(),before)
+            write_points(endpoint/'polyMesh/points',moved_points(original,t-.02))
+            with self.assertRaises(runner.PhaseExecutionIssue):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_resumed_checkpoint_point_hash_is_required_before_clock_exception(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,_,_=motion_fixture(root,stage4=True,start=.02);t=.03;endpoint=root/'case/0.03'
+            write_points(endpoint/'polyMesh/points',moved_points(original,t));initial=root/'case'/format(.02,'.17g')
+            write_points(initial/'polyMesh/points',original)
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'immutable copied checkpoint'):
+                runner.rotor_motion(root,[(.02,initial),(t,endpoint)],motion_log(t))
+
+    def test_copied_checkpoint_alone_cannot_establish_new_native_motion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);motion_fixture(root,stage4=True,start=.02);initial=root/'case'/format(.02,'.17g')
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'new logged post-start'):
+                runner.rotor_motion(root,[(.02,initial)],motion_log(.03))
+
+    def test_nonzero_declared_initial_phase_cannot_be_silently_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,prep_name,manifest_name=motion_fixture(root);t=.03;endpoint=root/'case/0.03'
+            write_points(endpoint/'polyMesh/points',moved_points(original,t))
+            prep=json.loads((root/prep_name).read_bytes());manifest=json.loads((root/manifest_name).read_bytes())
+            study_path=root/'phase-classroom-study.json';study=json.loads(study_path.read_bytes())
+            for values in (prep['declaredStudyInputs'],manifest['studyInputs'],study['input']):values['initialAngleRad']=.1
+            (root/prep_name).write_bytes(runner.preparation.canonical(prep));manifest['preparationReportSha256']=sha256((root/prep_name).read_bytes()).hexdigest()
+            (root/manifest_name).write_bytes(runner.preparation.canonical(manifest));study_path.write_bytes(runner.preparation.canonical(study))
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'zero initial rotor phase'):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_motion_labels_come_from_bound_cell_membership_not_point_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,prep_name,manifest_name=motion_fixture(root);t=.03;endpoint=root/'case/0.03'
+            source=root/'case/constant/polyMesh/cellZones';source.write_text(source.read_text().replace('1(0)','1(9)'))
+            write_points(endpoint/'polyMesh/points',moved_points(original,t))
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'SHA256'):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+            # Even a caller rehashing a malformed zone cannot create valid labels.
+            prep=json.loads((root/prep_name).read_bytes());manifest=json.loads((root/manifest_name).read_bytes())
+            for row in prep['preservedNativeMeshFiles']:
+                if row['path'].endswith('cellZones'):row.update(bytes=len(source.read_bytes()),sha256=sha256(source.read_bytes()).hexdigest())
+            (root/prep_name).write_bytes(runner.preparation.canonical(prep))
+            for row in manifest['files']:
+                if row['path'].endswith('cellZones'):row.update(bytes=len(source.read_bytes()),sha256=sha256(source.read_bytes()).hexdigest())
+            manifest['preparationReportSha256']=sha256((root/prep_name).read_bytes()).hexdigest();(root/manifest_name).write_bytes(runner.preparation.canonical(manifest))
+            with self.assertRaises(ValueError):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_interleaved_native_point_indices_preserve_zone_derived_motion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);order=(0,4,1,5,2,6,3,7);original,_,_,_=motion_fixture(root,point_order=order);t=.03;endpoint=root/'case/0.03'
+            expected=moved_points(MOTION_POINTS,t);write_points(endpoint/'polyMesh/points',tuple(expected[i] for i in order))
+            result=runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+            self.assertEqual(result['sourcePointLabelsSha256'],sha256(bytes(old<4 for old in order)).hexdigest())
+            self.assertTrue(result['rigidRotorMotionVerified']);self.assertTrue(result['stationaryPointIdentityVerified'])
+
+    def test_shared_rotor_stator_cell_point_adjacency_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,prep_name,manifest_name=motion_fixture(root);t=.03;endpoint=root/'case/0.03'
+            source=root/'case/constant/polyMesh/faces';source.write_bytes(source.read_bytes().replace(b'3(4 6 5)',b'3(0 6 5)'))
+            prep=json.loads((root/prep_name).read_bytes());manifest=json.loads((root/manifest_name).read_bytes())
+            for rows in (prep['preservedNativeMeshFiles'],manifest['files']):
+                for row in rows:
+                    if row['path'].endswith('/faces'):row.update(bytes=len(source.read_bytes()),sha256=sha256(source.read_bytes()).hexdigest())
+            (root/prep_name).write_bytes(runner.preparation.canonical(prep));manifest['preparationReportSha256']=sha256((root/prep_name).read_bytes()).hexdigest();(root/manifest_name).write_bytes(runner.preparation.canonical(manifest))
+            write_points(endpoint/'polyMesh/points',moved_points(original,t))
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'disjoint rotor/stator'):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_current_clock_paths_identity_and_declared_axis_are_checked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,prep_name,manifest_name=motion_fixture(root);t=.03;endpoint=root/'case/0.03'
+            write_points(endpoint/'polyMesh/points',moved_points(original,t))
+            for times,log in (([(t,endpoint)],motion_log(.04)), ([(.04,endpoint)],motion_log(.04)),
+                              ([(t,endpoint),(t,endpoint)],motion_log(t)), ([(float('nan'),endpoint)],motion_log(t))):
+                with self.assertRaises(runner.PhaseExecutionIssue):runner.rotor_motion(root,times,log)
+            axis=root/'case/constant/dynamicMeshDict';axis.write_text(axis.read_text().replace('axis (0 0 1)','axis (1 0 0)'))
+            prep=json.loads((root/prep_name).read_bytes());manifest=json.loads((root/manifest_name).read_bytes())
+            for rows in (prep['authoredInputFiles'],manifest['files']):
+                for row in rows:
+                    if row['path'].endswith('dynamicMeshDict'):row.update(bytes=len(axis.read_bytes()),sha256=sha256(axis.read_bytes()).hexdigest())
+            (root/prep_name).write_bytes(runner.preparation.canonical(prep));manifest['preparationReportSha256']=sha256((root/prep_name).read_bytes()).hexdigest();(root/manifest_name).write_bytes(runner.preparation.canonical(manifest))
+            with self.assertRaisesRegex(runner.PhaseExecutionIssue,'exact source-bound'):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+
+    def test_motion_tolerance_and_input_change_during_comparison_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);original,_,_,_=motion_fixture(root);t=.03;endpoint=root/'case/0.03';correct=list(moved_points(original,t))
+            correct[0]=(correct[0][0]+1e-12,*correct[0][1:]);write_points(endpoint/'polyMesh/points',correct)
+            self.assertTrue(runner.rotor_motion(root,[(t,endpoint)],motion_log(t))['rigidRotorMotionVerified'])
+            correct[0]=(correct[0][0]+1e-6,*correct[0][1:]);write_points(endpoint/'polyMesh/points',correct)
+            with self.assertRaises(runner.PhaseExecutionIssue):runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
+            write_points(endpoint/'polyMesh/points',moved_points(original,t));read_points=runner.points
+            def mutate(path):
+                result=read_points(path)
+                if Path(path)==endpoint/'polyMesh/points':(root/'case/constant/polyMesh/owner').write_text('changed after binding')
+                return result
+            with patch.object(runner,'points',side_effect=mutate),self.assertRaisesRegex(runner.PhaseExecutionIssue,'changed during'):
+                runner.rotor_motion(root,[(t,endpoint)],motion_log(t))
 
     def test_point_count_and_no_trailing_payload_are_checked(self):
         with tempfile.TemporaryDirectory() as temp:

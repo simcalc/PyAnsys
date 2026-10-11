@@ -13,6 +13,7 @@ import reduce_stage4_campaign as reduction
 import frozen_rotor_stage4_case as builder
 import run_frozen_rotor_phase as phase_runner
 import run_stage4_campaign as runner
+import test_frozen_phase_runner as motion_fixtures
 
 
 def write(root,name,raw):
@@ -32,8 +33,7 @@ def prepared(root,index=0,pressure=50000):
         row=write(root,"case/"+name,text);authored.append({**row,"path":name})
     meshes=[]
     for name in sorted(reduction.case.MESH_FILES):
-        text=reduction.case.base.foam_header(name,"vectorField" if name=="points" else "dictionary")
-        text+="2\n((0 0 0)(1 0 0))\n" if name=="points" else "0\n()\n"
+        text=motion_fixtures.motion_mesh_files()[name]
         row=write(root,"case/constant/polyMesh/"+name,text);meshes.append({**row,"path":"constant/polyMesh/"+name})
     geometry=js(root,"geometry-identity.json",{"schemaVersion":"untirta.frozen-rotor-fixed-geometry-identity.v1",
         "exampleDataCommit":reduction.case.base.inventory.PIN,"fixtureKind":"SYNTHETIC-UNIT-TEST-NOT-CFD","mainApplicationWrites":False})
@@ -96,7 +96,7 @@ def executed(root,index=0,head=10,missing=None,residual=1e-6):
         value="(1 2 3)" if name=="U" else "50000" if name in {"p","p_rgh"} else "1"
         raw=native_field(name,value)
         fields.append({**write(root,"case/"+endname+"/"+name,raw),"fieldCheck":phase_runner.finite_field(raw,name,2)})
-    write(root,"case/"+endname+"/polyMesh/points",reduction.case.base.foam_header("points","vectorField")+"2\n((0 0 0)(-1 0 0))\n")
+    motion_fixtures.write_points(root/f"case/{endname}/polyMesh/points",motion_fixtures.moved_points(motion_fixtures.MOTION_POINTS,end))
     report={"schemaVersion":runner.BRANCH_SCHEMA,"exampleDataCommit":reduction.case.base.inventory.PIN,
         "fixtureKind":"SYNTHETIC-UNIT-TEST-NOT-CFD","status":"STAGE4_NATIVE_EXECUTED_ACCEPTANCE_REQUIRED","mode":"transient-sliding","id":variant["id"],
         **{k:True for k in ("actualCfdRunVerified","simulationExecuted","nativeCheckMeshVerified","nativeSolverCompleted","cavitationModelExecuted",

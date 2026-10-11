@@ -7,6 +7,7 @@ pressure campaign, time convergence, restart or an experimental pump model.
 from __future__ import annotations
 
 import argparse
+from array import array
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -261,29 +262,201 @@ def points(path):
     return values
 
 
+def motion_inputs(directory):
+    """Bind current reference point labels and the exact supported motion recipe.
+
+    Labels come from actual faces/owner/neighbour/cellZones, never a component
+    offset, coordinate sort or guessed radius. Upstream numerical qualification
+    remains the separate reducer's responsibility.
+    """
+    import frozen_rotor_native_quality as quality
+    root = preparation.base.regular_directory(directory)
+    choices = [("phase-change-preparation.json", preparation.SCHEMA, "phase-input-manifest.json",
+                "untirta.frozen-rotor-phase-input-manifest.v1", "phase-classroom-study.json", "preservedNativeMeshFiles"),
+               ("stage4-branch-preparation.json", "untirta.frozen-rotor-stage4-branch-preparation.v1", "stage4-input-manifest.json",
+                "untirta.frozen-rotor-stage4-input-manifest.v1", "stage4-classroom-study.json", "referenceMeshFiles")]
+    chosen = [row for row in choices if (root/row[0]).exists()]
+    require(len(chosen) == 1, "Exactly one current supported sliding preparation must bind actual point motion.")
+    prep_name, prep_schema, manifest_name, manifest_schema, study_name, mesh_key = chosen[0]
+    records = []
+    def read(relative, limit=preparation.MAX_FILE_BYTES):
+        preparation.relative_path(relative)
+        target = root/relative
+        for item in (target, *target.parents):
+            require(not item.is_symlink() and not getattr(item, "is_junction", lambda: False)(), "Motion evidence cannot contain links/junctions.")
+        raw = preparation.base.read_regular(target, limit)
+        records.append({"path":relative,"bytes":len(raw),"sha256":sha256(raw).hexdigest()})
+        return raw
+    prep_raw = read(prep_name, preparation.base.inventory.MAX_REPORT_BYTES)
+    prep = preparation.json_file(root/prep_name)
+    manifest_raw = read(manifest_name, preparation.base.inventory.MAX_REPORT_BYTES)
+    manifest = preparation.json_file(root/manifest_name)
+    study_raw = read(study_name, preparation.base.inventory.MAX_REPORT_BYTES)
+    study = preparation.json_file(root/study_name)
+    declared = preparation.protocol.prepare_study(inputs=prep.get("declaredStudyInputs"), gravity_in_solver=False)
+    require(declared["input"].get("initialAngleRad") == 0, "This exact native motion recipe supports only an explicitly declared zero initial rotor phase.")
+    require(prep.get("schemaVersion") == prep_schema and prep.get("mainApplicationWrites") is False
+            and manifest.get("schemaVersion") == manifest_schema and manifest.get("mode") == "transient-sliding"
+            and manifest.get("preparationReportSha256") == sha256(prep_raw).hexdigest()
+            and prep.get("physicalBasis") == manifest.get("physicalBasis") == study.get("physicalBasis") == declared["physicalBasis"]
+            and manifest.get("studyInputs") == study.get("input") == prep.get("declaredStudyInputs") == declared["input"],
+            "Current source-bound study, fixed +z origin and sliding preparation/manifest must agree.")
+    plan = manifest.get("temporalPlan", {})
+    start = preparation.protocol.number(plan.get("initialTimeS", 0), nonnegative=True)
+    end = preparation.protocol.number(plan.get("endTimeS"), positive=True)
+    speed = declared["input"]["speedRpm"]
+    require(start < end <= 10*(60/speed)*(1+1e-12) and math.isclose(plan.get("rotationPeriodS", 0), 60/speed, rel_tol=1e-12), "Actual motion uses the bound global physical-time domain and declared RPM within the supported ten-revolution trial.")
+    bound = {row.get("path"):row for row in manifest.get("files", [])}
+    require(len(bound) == len(manifest.get("files", [])), "Motion manifest paths must be unique.")
+    def expected_record(relative, row):
+        actual = records[-1]
+        require(row and row.get("bytes") == actual["bytes"] and row.get("sha256") == actual["sha256"], "Current motion input differs from its source-bound SHA256: "+relative)
+        current = bound.get(relative)
+        require(current and current.get("bytes") == actual["bytes"] and current.get("sha256") == actual["sha256"], "Current native input manifest must bind every motion input: "+relative)
+    mesh_rows = prep.get(mesh_key, [])
+    require(isinstance(mesh_rows, list) and len(mesh_rows) == 6 and {row.get("path") for row in mesh_rows} == {"constant/polyMesh/"+name for name in preparation.MESH_FILES}, "All six immutable reference mesh files are required for point-label motion proof.")
+    mesh_raw = {}
+    for row in sorted(mesh_rows, key=lambda value:value["path"]):
+        relative = "case/"+row["path"]; mesh_raw[Path(relative).name] = read(relative); expected_record(relative, row)
+    authored = {row.get("path"):row for row in prep.get("authoredInputFiles", [])}
+    for name in ("constant/dynamicMeshDict", "system/controlDict"):
+        raw = read("case/"+name); expected_record("case/"+name, authored.get(name))
+        if name.endswith("dynamicMeshDict"):
+            expected = preparation.base.foam_header("dynamicMeshDict", location="constant") + 'mover {type motionSolver; libs ("libfvMotionSolvers.so"); motionSolver solidBody; cellZone rotating-fluid; solidBodyMotionFunction rotatingMotion; origin (0 0 0); axis (0 0 1); omega '+format(speed, ".17g")+' [rpm];}\n'
+            require(raw == expected.encode("ascii") and not (root/"case/constant/MRFProperties").exists(), "Use only the exact source-bound +z, zero-origin, zero-initial-phase rotating recipe; double MRF rotation is prohibited.")
+        else:
+            text = raw.decode("ascii")
+            for key, value in (("startTime", start), ("endTime", end)):
+                values = re.findall(r"(?m)^"+key+r"\s+("+reduction.FLOAT+r");",text)
+                require(len(values) == 1 and float(values[0]) == value, "Actual motion clock differs from its authored control: "+key)
+    geometry_raw = read("geometry-identity.json", preparation.base.inventory.MAX_REPORT_BYTES)
+    geometry = preparation.json_file(root/"geometry-identity.json")
+    geometry_row = records[-1]
+    source_geometry = prep.get("sourceGeometryIdentityFile", {})
+    require(geometry.get("schemaVersion") == "untirta.frozen-rotor-fixed-geometry-identity.v1"
+            and geometry.get("exampleDataCommit") == preparation.base.inventory.PIN and geometry.get("mainApplicationWrites") is False
+            and source_geometry.get("path", source_geometry.get("name")) == "geometry-identity.json"
+            and source_geometry.get("bytes") == len(geometry_raw) and source_geometry.get("sha256") == geometry_row["sha256"]
+            and prep.get("sourceGeometryControlSha256") == sha256(preparation.canonical([geometry_row])).hexdigest(), "The original source-pinned geometry identity must bind motion labels unchanged.")
+    expected_record("geometry-identity.json", source_geometry)
+    original = points(root/"case/constant/polyMesh/points")
+    def labels(name):
+        body = quality.native_body(mesh_raw[name], name, {"labelList"})
+        match = re.fullmatch(r"(\d+)\s*\(([^()]*)\)\s*;?",body,re.S)
+        require(match, "Actual motion owner/neighbour labels require a complete counted native list.")
+        tokens = match[2].split(); count = int(match[1])
+        require(count <= 6*MAX_CELL_COUNT and len(tokens) == count and all(re.fullmatch(r"\d+",token) and int(token) < MAX_CELL_COUNT for token in tokens), "Motion topology labels must be bounded complete nonnegative integers.")
+        return array("I", (int(token) for token in tokens))
+    owner, neighbour = labels("owner"), labels("neighbour")
+    require(owner and len(neighbour) <= len(owner), "Complete current owner/neighbour topology is required.")
+    cells = max(max(owner), max(neighbour, default=0))+1
+    require(0 < cells <= MAX_CELL_COUNT and all(a != b for a,b in zip(owner,neighbour)), "Actual face cell labels must fit the bounded nondegenerate fluid domain.")
+    zones = quality.zones(mesh_raw["cellZones"], cells)
+    rotating, stationary = zones["rotating-fluid"], zones["stationary-fluid"]
+    masks, stator_masks, used = bytearray(len(original)), bytearray(len(original)), bytearray(len(original))
+    faces = quality.native_body(mesh_raw["faces"], "faces", {"faceList"})
+    match = re.fullmatch(r"(\d+)\s*\((.*)\)\s*;?",faces,re.S)
+    require(match and int(match[1]) == len(owner), "Every actual native face must bind one owner label.")
+    previous, count = 0, 0
+    for face in re.finditer(r"(\d+)\s*\(([^()]*)\)", match[2]):
+        require(not match[2][previous:face.start()].strip() and count < len(owner), "Complete actual native face ordering is required.")
+        tokens = face[2].split(); ids = [int(token) for token in tokens if re.fullmatch(r"\d+",token)]
+        require(3 <= len(ids) <= 64 and len(ids) == int(face[1]) == len(tokens) and len(set(ids)) == len(ids)
+                and all(0 <= value < len(original) for value in ids), "Motion faces require distinct bounded native point labels.")
+        selected = owner[count] in rotating or count < len(neighbour) and neighbour[count] in rotating
+        stationary_selected = owner[count] in stationary or count < len(neighbour) and neighbour[count] in stationary
+        for point in ids:
+            used[point] = 1
+            if selected:masks[point] = 1
+            if stationary_selected:stator_masks[point] = 1
+        previous, count = face.end(), count+1
+    require(count == len(owner) and not match[2][previous:].strip() and all(used) and 0 < sum(masks) < len(original), "Both moving and stationary native point sets must be complete and nonempty.")
+    require(all((rotor+stator) == 1 for rotor,stator in zip(masks,stator_masks)), "This NCC sliding recipe requires explicitly disjoint rotor/stator cell-point adjacency; shared motion topology is unsupported.")
+    checkpoint_point = None
+    if start > 0:
+        require(prep_schema == "untirta.frozen-rotor-stage4-branch-preparation.v1", "Only a source-bound Stage4 checkpoint can establish a resumed motion clock.")
+        read("stage4-checkpoint.json", preparation.base.inventory.MAX_REPORT_BYTES)
+        checkpoint = preparation.json_file(root/"stage4-checkpoint.json")
+        files = checkpoint.get("files", [])
+        require(checkpoint.get("schemaVersion") == "untirta.frozen-rotor-stage4-native-checkpoint.v1"
+                and checkpoint.get("physicalTimeS") == start and checkpoint.get("mainApplicationWrites") is False
+                and isinstance(files,list) and 0 < len(files) <= 64
+                and sha256(preparation.canonical(files)).hexdigest() == checkpoint.get("checkpointSha256") == prep.get("resumeCheckpointSha256"),
+                "The resumed motion clock requires the exact hash-bound native checkpoint.")
+        matches = [row for row in files if isinstance(row,dict) and re.fullmatch(r"case/"+TIME_NAME+r"/polyMesh/points",row.get("path",""))
+                   and math.isclose(float(row["path"].split("/")[1]),start,rel_tol=0,abs_tol=1e-12)]
+        require(len(matches) == 1, "The initial resumed moving points must be bound to one exact checkpoint file.")
+        checkpoint_point = matches[0]
+    return {"root":root,"points":original,"rotating":masks,"stationary":stator_masks,"records":records,"start":start,"end":end,"speedRpm":speed,"checkpointPoint":checkpoint_point,
+            "pointLabelsSha256":sha256(bytes(masks)).hexdigest(),"statorLabelsSha256":sha256(bytes(stator_masks)).hexdigest(),"manifestSha256":sha256(manifest_raw).hexdigest(),"studySha256":sha256(study_raw).hexdigest()}
+
+
 def rotor_motion(directory, time_directories, log_text):
-    """Observe actual changed native coordinates; motion dictionaries alone are insufficient."""
+    """Compare every bound rotor/stator point to its global-clock rigid motion."""
     require(re.search(r"Selecting solidBodyMotionFunction rotatingMotion", log_text), "The native solver must select actual rotatingMotion.")
-    original = points(directory / "case/constant/polyMesh/points")
+    inputs = motion_inputs(directory)
+    original, rotating, root = inputs["points"], inputs["rotating"], inputs["root"]
     bounds = [(min(point[axis] for point in original), max(point[axis] for point in original)) for axis in range(3)]
     scale = math.hypot(*(high - low for low, high in bounds))
     require(math.isfinite(scale) and scale > 0, "The reference mesh must span a real three-dimensional coordinate scale.")
-    evidence, maximum = [], 0.
+    absolute, relative = 1e-11, 1e-10
+    tolerance = absolute + relative*scale
+    logged = [float(value) for value in re.findall(r"(?m)^Time = ("+reduction.FLOAT+r")s?\s*$",log_text)]
+    require(isinstance(time_directories, (list,tuple)) and 0 < len(time_directories) <= 64 and logged, "Current moved-point evidence needs actual bounded solver-clock records.")
+    evidence, maximum, previous_time = [], 0., -1.
     for physical_time, path in time_directories:
+        require(type(physical_time) in (int,float) and math.isfinite(physical_time) and previous_time < physical_time
+                and inputs["start"] <= physical_time <= inputs["end"]+1e-12 and physical_time > 0,
+                "Moved-point times must be unique, ordered and inside the bound physical-time domain.")
+        path = Path(path).absolute()
+        initial_checkpoint = physical_time == inputs["start"] and inputs["checkpointPoint"] is not None
+        require(path.parent == root/"case" and re.fullmatch(TIME_NAME,path.name)
+                and math.isclose(float(path.name),physical_time,rel_tol=5e-11,abs_tol=1e-12)
+                and (initial_checkpoint or any(math.isclose(value,physical_time,rel_tol=5e-11,abs_tol=1e-12) for value in logged)), "Every moved-point file must match its current local path and actual native physical clock.")
+        previous_time = physical_time
         source = path / "polyMesh/points"
-        if not source.exists():
-            continue
+        require(source.exists(), "Every supplied native write time must contain its actual moved-point evidence.")
+        for item in (source,*source.parents):
+            require(not item.is_symlink() and not getattr(item,"is_junction",lambda:False)(), "Moved-point paths cannot contain links/junctions.")
+        raw = preparation.base.read_regular(source, preparation.MAX_FILE_BYTES)
+        if initial_checkpoint:
+            row = inputs["checkpointPoint"]
+            require(row.get("path") == "case/"+path.name+"/polyMesh/points" and row.get("bytes") == len(raw)
+                    and row.get("sha256") == sha256(raw).hexdigest(), "Initial resumed point bytes must equal the immutable copied checkpoint.")
         values = points(source)
         require(len(values) == len(original), "A fixed-topology rotor motion must retain every reference point index.")
         displacement = max(math.dist(before, after) for before, after in zip(original, values))
-        raw = preparation.base.read_regular(source, preparation.MAX_FILE_BYTES)
+        angle = 2*math.pi*inputs["speedRpm"]*physical_time/60
+        sine, cosine = math.sin(angle), math.cos(angle)
+        rotor_error, stator_error = 0., 0.
+        for index, (before, after) in enumerate(zip(original,values)):
+            expected = (cosine*before[0]-sine*before[1],sine*before[0]+cosine*before[1],before[2]) if rotating[index] else before
+            error = math.dist(expected,after)
+            if rotating[index]:rotor_error = max(rotor_error,error)
+            else:stator_error = max(stator_error,error)
+        require(rotor_error <= tolerance and stator_error <= tolerance, "Actual rotor/stator coordinates violate the source-bound Rz(omega*t)x0 motion or stationary point identity.")
+        require(preparation.base.read_regular(source, preparation.MAX_FILE_BYTES) == raw, "Moved-point evidence changed during comparison.")
         evidence.append({"path": "case/" + path.name + "/polyMesh/points", "bytes": len(raw), "sha256": sha256(raw).hexdigest(),
-                         "physicalTimeS": physical_time, "maximumPointDisplacementAssumedM": displacement, "allPointCoordinatesChecked": True})
+                         "physicalTimeS": physical_time, "rotationAngleRad":angle,"maximumRotorErrorNativeUnits":rotor_error,
+                         "maximumStatorErrorNativeUnits":stator_error,"maximumPointDisplacementAssumedM": displacement, "allPointCoordinatesChecked": True})
         maximum = max(maximum, displacement)
-    require(evidence and maximum > 1e-10 * scale, "Physical sliding execution requires actual moved points beyond coordinate-rounding tolerance.")
+    post_start_writes = sum(row["physicalTimeS"] > inputs["start"] for row in evidence)
+    require(post_start_writes > 0, "Actual motion proof requires a new logged post-start point write; a copied checkpoint alone is insufficient.")
+    require(evidence and maximum > tolerance, "Physical sliding execution requires actual moved points beyond coordinate-rounding tolerance.")
+    for row in inputs["records"]:
+        raw = preparation.base.read_regular(root/row["path"], preparation.MAX_FILE_BYTES)
+        require(len(raw) == row["bytes"] and sha256(raw).hexdigest() == row["sha256"], "Source-bound motion inputs changed during verification.")
     return {"nativeRotatingMotionSelected": True, "nativeMovedPointsObserved": True, "nativeCoordinateUnitsVerified": False,
             "classroomMetresPerSourceCoordinateUnit": 1, "referenceDiagonalAssumedM": scale,
-            "coordinateRoundoffRelativeTolerance": 1e-10, "nativeMovedPointRecords": evidence,
+            "coordinateRoundoffRelativeTolerance": relative,"coordinateRoundoffAbsoluteToleranceNativeUnits":absolute,
+            "comparisonToleranceNativeUnits":tolerance,"rotationAxis":[0,0,1],"rotationOriginNativeUnits":[0,0,0],"initialRotorAngleRad":0,
+            "motionEquation":"x_rotor(t)=Rz(2*pi*RPM*t/60)*x0; x_stator(t)=x0; global t is not reset at restart",
+            "rotorPointCount":sum(rotating),"statorPointCount":sum(inputs["stationary"]),"sourcePointLabelsSha256":inputs["pointLabelsSha256"],
+            "sourceStatorPointLabelsSha256":inputs["statorLabelsSha256"],"rotorStatorPointAdjacencyDisjointVerified":True,
+            "motionInputRecords":inputs["records"],"inputManifestSha256":inputs["manifestSha256"],"studySha256":inputs["studySha256"],
+            "rigidRotorMotionVerified":True,"stationaryPointIdentityVerified":True,"nativeMovedPointRecords": evidence,
+            "nativePostStartPointWriteCount":post_start_writes,
+            "actualWallVelocityChecked":False,"actualMeshFluxChecked":False,"fullStateRestartVerified":False,
             "interfaceCoverageAtAllRotorAnglesVerified": False, "periodicTransientQualified": False}
 
 

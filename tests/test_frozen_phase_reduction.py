@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import frozen_rotor_phase_reduction as phase
 import run_frozen_rotor_phase as runner
+import test_frozen_phase_runner as motion_fixtures
 
 
 def write(root, relative, value):
@@ -35,7 +36,7 @@ def prepared_fixture(root, *, pressure=50000, mode="steady-sweep", dt=None, dura
         row=write(root,"case/"+name,content);authored.append({**row,"path":name})
     mesh=[]
     for name in sorted(phase.campaign.MESH_FILES):
-        content=phase.campaign.base.foam_header(name,"vectorField" if name=="points" else "dictionary")+("2\n((0 0 0)(1 0 0))\n" if name=="points" else "0\n()\n")
+        content=motion_fixtures.motion_mesh_files()[name]
         row=write(root,"case/constant/polyMesh/"+name,content);mesh.append({**row,"path":"constant/polyMesh/"+name})
     geometry={"schemaVersion":"untirta.frozen-rotor-fixed-geometry-identity.v1","exampleDataCommit":phase.campaign.base.inventory.PIN,
               "fixtureKind":"SYNTHETIC-UNIT-TEST-NOT-CFD","mainApplicationWrites":False}
@@ -121,8 +122,7 @@ def execution_fixture(root, *, mode="steady-sweep", residual=1e-6, outlet_vapor=
                "temporalPlan":plan,"inletAbsoluteTotalPressurePa":p0,"stages":stages,"nativeMeshQuality":phase.native.parse_mesh_quality(check),
                "nativeEndTimeS":end,"finalNativeFieldRecords":fields,"nativeSamplingRecords":runner.sampling_records(root)}
     if mode=="transient-sliding":
-        angle=2*math.pi*end/plan["rotationPeriodS"]
-        write(root,f"case/{endpoint}/polyMesh/points",phase.campaign.base.foam_header("points","vectorField")+f"2\n((0 0 0)({math.cos(angle):.17g} {math.sin(angle):.17g} 0))\n")
+        motion_fixtures.write_points(root/f"case/{endpoint}/polyMesh/points",motion_fixtures.moved_points(motion_fixtures.MOTION_POINTS,end))
         execution["rotorMotionEvidence"]=runner.rotor_motion(root,[(end,root/"case"/endpoint)],solver)
     json_write(root,"phase-change-execution.json",execution)
     return packet
