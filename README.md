@@ -942,6 +942,32 @@ reconstructions overshoot neighbouring values. This supports a controlled
 candidate trial, not a proven cause or promised convergence. The preparation
 and runner regression passes 48 tests before any new native result is known.
 
+### Separate native torque diagnostic
+
+The manual `Fixed unqualified classroom pump torque diagnostic` workflow
+examines only the immutable stored iteration 500 of the failed run
+`38197674270`, source commit
+`834fc53cd1ad582496608d3549a3f18a0461f72f`. Its complete source archive is
+69191600 bytes with SHA256
+`c633fa042dc9091e5f8dccf12d68456b6c34bfb986681fac5778a296f5d0d25e`.
+Exact public-run metadata, archive size, CRC, member roles and every current
+extracted byte are checked before a separate minimal case is created.
+
+The package-owned Foundation 12 `foamPostProcess` utility constructs the
+single-phase SST solver at that stored state. It runs no new flow iterations.
+Four native force tables independently integrate the blade, rotating hub,
+rotating shroud and their combined rotor about the declared origin. Their
+component sums must agree. Pressure and viscous moments retain their signs;
+the Python equation stages show `P_rotor_to_fluid = -omega_z * M_fluid_on_rotor,z`
+and the separate sampled hydraulic power `P_h = Q * Delta(p_total)`.
+
+The diagnostic is bounded to one CPU, four GiB, 300 seconds and one GiB
+workspace. Utility and selected solver/force library identities, native
+warnings, actual finite tables and unchanged original/copied inputs are
+checked. A successful utility exit is insufficient. This diagnostic does not
+qualify the failed baseline, an efficiency, an energy balance, H0, NPSH3,
+mesh/time convergence, physical transient or restart.
+
 ### Conditional active cavitation reference
 
 The manual `Authored classroom pump active cavitation reference` workflow

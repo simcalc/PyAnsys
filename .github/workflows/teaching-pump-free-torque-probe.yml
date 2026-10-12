@@ -1,0 +1,84 @@
+name: Fixed unqualified classroom pump torque diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: teaching-pump-fixed-source-torque-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  torque:
+    name: FREE fixed failed baseline data-only native torque probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Verify focused fixed-source and torque contracts
+        run: python -B -m unittest discover -s tests -p 'test_teaching_pump_torque_probe*.py' -v
+      - name: Verify public FREE runner and transfer only the exact failed source archive
+        env:
+          PYANSYS_REPOSITORY_READ_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B tools/public_runner_guard.py
+          /usr/bin/timeout --kill-after=10s 300s python -B tools/teaching_pump_torque_probe_source.py \
+            --fetch --output-directory "$RUNNER_TEMP/teaching-torque-source"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Run one bounded stored500 native diagnostic without flow iterations
+        env:
+          PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="teaching-torque-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 330s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            python -B tools/teaching_pump_torque_probe.py \
+            --source-directory "$RUNNER_TEMP/teaching-torque-source/source-baseline" \
+            --output-directory "$RUNNER_TEMP/teaching-torque-diagnostic"
+      - name: Retain separate fixed original source archive and byte-transfer proof
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: teaching-torque-fixed-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/teaching-torque-source/
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Retain separate native torque diagnostic without baseline acceptance
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: teaching-torque-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/teaching-torque-diagnostic/
+          if-no-files-found: warn
+          retention-days: 1
