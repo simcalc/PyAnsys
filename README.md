@@ -1276,3 +1276,18 @@ its reverse flux was localized at the inner outlet edge. This new geometry
 does not inherit that execution or predict convergence. Its reported head is
 the **extended assembly head**, including extra duct losses, with no pump-only
 head correction. It does not qualify a pressure sweep, NPSHr or transient.
+
+### Lower-flow operating-point investigation and clearer rejection logs
+
+The manual `teaching-pump-free-lower-flow.yml` trial declares **45 kg/s**, or
+**162.29212582649 m³/h**, on the same0.30 m outlet assembly. Its distinct
+source, study and native field identities require fresh evidence; the earlier
+90 kg/s result remains unqualified. Only the inlet volumetric-flow value
+changes in the verified physics recipe. Numerical acceptance and resource
+limits remain unchanged. This is a new classroom operating point, with no
+claim of BEP, guaranteed convergence or a repaired90 kg/s performance result.
+
+[The trial plan](docs/teaching_pump_lower_flow_trial.md) includes input,
+equation, substitution and result. Reducer logs now show actual criteria,
+limits and reason codes beside native/numerical flags. Exit2 is retained when
+acceptance fails; an explanatory message does not change the science result.

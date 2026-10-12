@@ -668,7 +668,8 @@ def main():
     result = reduce_baseline(target)
     raw = encoded(result); require(len(raw) <= native.MAX_RECORD, "TEACHING_BOUNDED_ACCEPTANCE_REPORT_REQUIRED")
     native.case_tool.write_exclusive(target / REPORT_FILE, raw)
-    print(json.dumps({k: result[k] for k in ("status", "actualCfdRunVerified", "numericalBaselineQualified", "qualifiedBaseline", "mainApplicationWrites")}))
+    import teaching_pump_acceptance_messages as messages
+    print(json.dumps(messages.describe(result),allow_nan=False))
     return 0 if result["actualCfdRunVerified"] and result["numericalBaselineQualified"] else 2
 
 
