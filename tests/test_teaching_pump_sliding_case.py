@@ -11,6 +11,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 import teaching_pump_sliding_case as case
+import teaching_pump_restart_clock as restart_clock
 from test_teaching_pump_pressure_case import source_fixture as upstream_fixture
 from test_teaching_pump_phase_case import write_region_fixture
 
@@ -76,10 +77,64 @@ class SlidingRecipeTests(unittest.TestCase):
         self.assertIn('purgeWrite 0;',control);self.assertIn('endTime '+format(1.25*60/1450,'.17g')+';',control)
         self.assertIn('writeInterval '+format(60/1450/4,'.17g')+';',control)
         self.assertIn('adjustTimeStep yes;',control);self.assertEqual(len(case.TEMPORAL_PLAN['expectedWriteTimesS']),5)
+        self.assertIn('timeFormat general;',control);self.assertIn('timePrecision 17;',control);self.assertIn('writePrecision 17;',control)
+        self.assertEqual(case.TEMPORAL_PLAN['timeFormat'],'general');self.assertEqual(case.TEMPORAL_PLAN['timePrecision'],17)
+        self.assertEqual(case.TEMPORAL_PLAN['writePrecision'],17);self.assertTrue(case.TEMPORAL_PLAN['timeNamePrecisionIsDeclaredInput'])
+        self.assertFalse(case.TEMPORAL_PLAN['storedNativeTimeRoundTripVerified'])
         self.assertTrue(case.TEMPORAL_PLAN['adaptiveTimeStep']);self.assertFalse(case.TEMPORAL_PLAN['fixedGridClockVerified'])
         self.assertFalse(case.TEMPORAL_PLAN['durationIsAcceptanceProof']);self.assertEqual(case.MOTION_PLAN['initialPhaseRad'],0)
         self.assertEqual(case.MOTION_PLAN['axis'],[0,0,1]);self.assertEqual(case.LIMITS['plannedNativeMaximumSeconds'],1200)
         self.assertEqual(case.LIMITS['maximumWorkspaceBytes'],1024**3)
+
+    def test_fractional_quarter_turn_name_replays_strict_stored_clock_without_precision_waiver(self):
+        # Synthetic TimeIO-shaped data only, not an executed native checkpoint.
+        # Pinned TimeIO.C223 uses timeName(value,maxPrecision_) for the value;
+        # default doubleScalar epsilon makes that maximum 18 significant digits.
+        value=case.TEMPORAL_PLAN['expectedWriteTimesS'][0]
+        self.assertEqual(value,60/1450/4)
+        name=format(value,'.17g');rounded_name=format(value,'.12g')
+        self.assertEqual(float(name),value)
+        self.assertGreater(abs(float(rounded_name)-value),4*math.ulp(value))
+        for value_precision in (18,16):
+            def state(folder):
+                return (case.base.foam_header('time','dictionary',folder+'/uniform')
+                    +f'beginTime 0; value {format(value,"."+str(value_precision)+"g")}; name "{folder}"; index 90; '
+                    +f'deltaT {format(case.TEMPORAL_PLAN["maximumTimeStepS"],".17g")}; '
+                    +f'deltaT0 {format(case.TEMPORAL_PLAN["maximumTimeStepS"],".17g")};').encode()
+            with self.subTest(value_precision=value_precision):
+                parsed=restart_clock.parse_time_state(state(name),name)
+                self.assertEqual(parsed['name'],name);self.assertTrue(restart_clock.close(parsed['valueS'],value))
+                self.assertEqual(parsed['index'],90)
+                with self.assertRaisesRegex(restart_clock.ClockIssue,'CURRENT_TIME'):
+                    restart_clock.parse_time_state(state(rounded_name),rounded_name)
+
+    def test_clock_precision_override_is_exact_guarded_and_preserves_default_faces_variants(self):
+        original=case.phase.native_recipe
+        for default_faces in (False,True):
+            with self.subTest(default_faces=default_faces):
+                fixed=original(self.study(),default_faces=default_faces)
+                moving=case.native_recipe(self.study(),default_faces=default_faces)
+                self.assertEqual(fixed['system/controlDict'].count(b'timePrecision 12;'),1)
+                self.assertEqual(moving['system/controlDict'].count(b'timePrecision 17;'),1)
+                self.assertNotIn(b'timePrecision 12;',moving['system/controlDict'])
+                for token in (b'timeFormat general;',b'writePrecision 17;'):
+                    self.assertEqual(fixed['system/controlDict'].count(token),1)
+                    self.assertEqual(moving['system/controlDict'].count(token),1)
+                self.assertTrue(all(fixed[p]==moving[p] for p in case.MODEL_FILES))
+                for changed in (b'',b'timePrecision 16;',b'timePrecision 17;',b'timePrecision 12.0;',
+                    b'timePrecision 12;\ntimePrecision 12;',b'timePrecision 12;\ntimePrecision 16;'):
+                    def mutate(*args,**kwargs):
+                        files=original(*args,**kwargs)
+                        files['system/controlDict']=files['system/controlDict'].replace(b'timePrecision 12;',changed)
+                        return files
+                    with self.subTest(changed=changed),patch.object(case.phase,'native_recipe',side_effect=mutate):
+                        with self.assertRaisesRegex(case.SlidingCaseIssue,'name-precision override'):
+                            case.native_recipe(self.study(),default_faces=default_faces)
+        for old,new in ((b'timeFormat general;',b'timeFormat fixed;'),(b'writePrecision 17;',b'writePrecision 12;')):
+            def mutate(*args,**kwargs):
+                files=original(*args,**kwargs);files['system/controlDict']=files['system/controlDict'].replace(old,new);return files
+            with self.subTest(new=new),patch.object(case.phase,'native_recipe',side_effect=mutate):
+                with self.assertRaisesRegex(case.SlidingCaseIssue,'name-precision override'):case.native_recipe(self.study())
 
     def test_wrong_si_study_or_unknown_initial_wall_recipe_fails(self):
         study=self.study();study['input']['speedRpm']=1800

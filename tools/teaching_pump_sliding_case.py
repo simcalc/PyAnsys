@@ -32,6 +32,8 @@ MOTION_PLAN = {"axis":[0,0,1],"originM":[0,0,0],"speedRpm":1450.,"initialPhaseRa
 TEMPORAL_PLAN = {"initialTimeS":0.,"endTimeS":1.25*PERIOD_S,"maximumTimeStepS":PERIOD_S/360,
     "rotationPeriodS":PERIOD_S,"writeIntervalS":PERIOD_S/4,
     "expectedWriteTimesS":[n*PERIOD_S/4 for n in range(1,6)],"retainedPositiveWriteCount":5,
+    "timeFormat":"general","timePrecision":17,"writePrecision":17,
+    "timeNamePrecisionIsDeclaredInput":True,"storedNativeTimeRoundTripVerified":False,
     "nativeCoLimit":.5,"nativeAlphaCoLimit":.25,"adaptiveTimeStep":True,"stationaryMrfRelaxation":False,
     "physicalRotorMotion":True,"durationIsAcceptanceProof":False,"periodicStateVerified":False,
     "timeStepConvergenceVerified":False,"fixedGridClockVerified":False}
@@ -73,6 +75,14 @@ def native_recipe(study, default_faces=False):
         require(count == 1,"Change only the exact original rotor/interface velocity patch: "+patch)
     authored["0/U"] = velocity
     control = authored["system/controlDict"]
+    # TimeIO stores the actual value at maxPrecision_; fractional write names
+    # need 17 significant digits to replay through the strict restart clock.
+    # This is an authored input, not proof that a native state was written.
+    for key,value in ((b"timeFormat",b"general"),(b"timePrecision",b"12"),(b"writePrecision",b"17")):
+        require(len(re.findall(rb"\b"+key+rb"\b",control))==1
+            and len(re.findall(rb"(?m)^"+key+b" "+value+rb";$",control))==1,
+            "Replay the exact inherited timeFormat general/timePrecision12/writePrecision17 before the pilot name-precision override.")
+    control=control.replace(b"timePrecision 12;",b"timePrecision 17;")
     for key, old, new in (("endTime",phase.DEFAULT_DURATION_S,TEMPORAL_PLAN["endTimeS"]),
         ("writeInterval",phase.DEFAULT_DURATION_S/4,TEMPORAL_PLAN["writeIntervalS"]),("purgeWrite",2,0)):
         previous=(key+" "+format(old,".17g")+";").encode(); replacement=(key+" "+format(new,".17g")+";").encode()

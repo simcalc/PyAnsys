@@ -1079,6 +1079,13 @@ periods. All five positive quarter-period states are retained, including the
 noninteger final rotor angle. These durations are inputs, not a periodicity or
 time-step-convergence test.
 
+The physical pilot explicitly authors `timeFormat general`, `timePrecision 17`
+and `writePrecision 17`. Fractional quarter-turn folder names then retain the
+precision needed by the strict stored-clock reader; a 12-digit folder name
+can differ from the higher-precision stored time value. Synthetic round-trip
+tests demonstrate this formatting issue and its guarded input correction.
+They do not prove that an actual checkpoint or matched restart was executed.
+
 Only the exact package-owned `checkMesh` and `foamRun` commands execute, with
 one CPU, four GiB, 1200 seconds, one GiB workspace and eight-MiB native logs.
 The current motion library has its own actual byte/ownership descriptor; this
