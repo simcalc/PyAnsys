@@ -1199,3 +1199,12 @@ its independent reducer can qualify a numerical baseline on that exact mesh.
 Numerical head/NPSHA stages preserve Input → Equation → Substitution → Result.
 NPSHr/NPSH3, wall resolution, mesh/time convergence, active-phase H0, physical
 transient, matched restart and manufacturer pump validation remain separate.
+
+The first inlet-flow job, run `38209617567`, stopped after successful native
+NCC creation and before CFD because the initial-field reader incorrectly
+required an explicit header version. Foundation 12 writes the current stream
+version implicitly. The reader now accepts exactly the four native ASCII
+role keys, or those same keys with explicit version `2.0`; duplicate, extra,
+wrong-role and wrong-version keys remain rejected. The ten retained native
+initial fields replay with unchanged byte/SHA records. This correction does
+not establish solver convergence or change any numerical acceptance limit.

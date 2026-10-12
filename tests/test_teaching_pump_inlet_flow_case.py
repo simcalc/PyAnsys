@@ -145,6 +145,46 @@ class TeachingInletFlowCaseTests(unittest.TestCase):
                     path=output/folder/"0/nut";path.write_bytes(path.read_bytes().replace(b"type nutkWallFunction;",b"type nutkWallFunction; Cmu .09; kappa .41; E 9.8;"))
                 self.assertEqual(case.verify_output(output,after_native_ncc=True)["report"]["boundaryFamilyId"],case.BC_FAMILY)
 
+    def test_foundation12_current_version_header_omission_preserves_exact_roles(self):
+        # Actual pinned IOobject::writeHeader omits version at currentVersion;
+        # synthetic byte replay here is compatibility, not native CFD evidence.
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            with self.fixture(root) as source:
+                output=root/"flow";case.prepare(source,output)
+                for component in ("impeller-case","volute-case"):
+                    for field in ("U","p","k","omega","nut"):
+                        path=output/component/"0"/field;raw=path.read_bytes()
+                        self.assertEqual(raw.count(b"version 2.0;"),1)
+                        path.write_bytes(raw.replace(b"version 2.0;",b""))
+                before={p.relative_to(output).as_posix():sha256(p.read_bytes()).hexdigest()
+                    for p in output.rglob("*") if p.is_file()}
+                actual=case.verify_output(output,after_native_ncc=True)
+                self.assertEqual(actual["report"]["boundaryFamilyId"],case.BC_FAMILY)
+                self.assertTrue(all(actual["report"][k] is False for k in case.FALSE_FLAGS))
+                self.assertEqual(before,{p.relative_to(output).as_posix():sha256(p.read_bytes()).hexdigest()
+                    for p in output.rglob("*") if p.is_file()})
+
+    def test_omitted_version_does_not_admit_unknown_duplicate_or_wrong_headers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            with self.fixture(root) as source:
+                output=root/"flow";case.prepare(source,output)
+                path=output/"impeller-case/0/U";original=path.read_bytes().replace(b"version 2.0;",b"")
+                for before,after in ((b"format ascii;",b"format binary;"),
+                    (b"format ascii;",b"format ascii; format ascii;"),
+                    (b"format ascii;",b"format ascii; version 2.1;"),
+                    (b"format ascii;",b"format ascii; version 2.0; version 2.0;"),
+                    (b"format ascii;",b"format ascii; unknown yes;"),
+                    (b"format ascii;",b'format ascii; arch "LSB;label=32;scalar=64";'),
+                    (b"class volVectorField;",b"class volScalarField;"),
+                    (b'location "0";',b'location "500";'),
+                    (b"object U;",b"object p;"),
+                    (b"object U;",b"object U; malformed")):
+                    with self.subTest(after=after):
+                        self.assertIn(before,original);path.write_bytes(original.replace(before,after))
+                        with self.assertRaises(ValueError):case.verify_output(output,after_native_ncc=True)
+
     def test_native_inlet_q_weights_code_or_wrong_section_cannot_enter_new_family(self):
         for replacement in ("volumetricFlowRate .1;","volumetricFlowRate {type table; values ((0 .09));}",
                 "volumetricFlowRate {type constant; value .090162292125826479 [m3/s];}",

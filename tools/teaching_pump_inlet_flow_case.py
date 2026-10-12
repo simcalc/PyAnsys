@@ -212,9 +212,12 @@ def verify_fields_after_ncc(root, authored):
         headers=re.findall(r"\bFoamFile\s*\{([^{}]*)\}",actual_prefix)
         require(len(headers)==1,"Retain one unique initial native FoamFile header.")
         pairs=re.findall(r"([A-Za-z][A-Za-z0-9_]*)\s+([^;{}]+);",headers[0]);header=dict(pairs)
-        expected_header={"version":"2.0","format":"ascii","class":"volVectorField" if field=="U" else "volScalarField",
+        expected_header={"format":"ascii","class":"volVectorField" if field=="U" else "volScalarField",
             "location":'"0"',"object":field}
-        require(len(header)==len(pairs) and header==expected_header
+        # Pinned Foundation12 IOobjectWriteHeader.C:43-46 omits version for
+        # the current stream version. Authored inputs explicitly declare2.0.
+        # Keep exactly those two header forms; no extra native metadata roles.
+        require(len(header)==len(pairs) and header in (expected_header,{"version":"2.0",**expected_header})
             and not re.sub(r"[A-Za-z][A-Za-z0-9_]*\s+[^;{}]+;","",headers[0]).strip(),
             "Initial data header keys/class/location/object must retain the exact reviewed native role.")
         for key in ("dimensions","internalField"):
