@@ -39,6 +39,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify the exact public FREE standard runner and authored resolution
+        env:
+          PYANSYS_REPOSITORY_READ_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
