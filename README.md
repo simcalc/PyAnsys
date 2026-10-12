@@ -1135,3 +1135,20 @@ must be inspected after native generation. These choices supply no baseline,
 NPSH3, fixed discrete boundary, mesh convergence or transient qualification.
 The existing 500000-cell hard limit remains in force. The baseline and phase
 workflows do not automatically select these geometry-only candidates.
+
+### Seeded frame inspection before matched restart research
+
+The separate `teaching_pump_seeded_frames.py` reader consumes the complete
+checkpoint clock and a fully bound resumed timeline. Selected frames must be
+genuinely consecutive native indices, with actual increments and previous
+increments. Every retained frame, all six constant mesh primitives and the
+motion dictionary have current SHA256 and exact role/header checks. Rotor
+coordinates are compared with `Rz(omega*t)*x0` using absolute global time and
+unchanged constant reference points; stator coordinates stay fixed.
+
+Its 17 synthetic contract tests check skipped/rebased frames, malformed
+numeric identities and primitive headers, inventory/clock mutations and
+bounds. The reader starts no process. Coordinate-equation facts and a complete
+stored role inventory do not qualify native provenance, installed runtime,
+field-state semantics, ALE conservation, wall flux, a matched restart or CFD
+performance. Those flags remain false until separately measured and admitted.
