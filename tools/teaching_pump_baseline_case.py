@@ -39,15 +39,23 @@ FALSE_FLAGS = ("commandExecutionPerformedByThisTool","simulationExecuted","actua
     "restartVerified","manufacturerPublishedGeometry","originalFluentGeometryReproduced","baselineFieldsCopied","mainApplicationWrites")
 LIMITS = {"maximumSeconds":1200,"maximumCpus":1,"maximumMemoryBytes":4*1024**3,"maximumWorkspaceBytes":MAX_WORKSPACE,
     "maximumFileBytes":MAX_FILE,"maximumReportBytes":MAX_REPORT,"maximumLogBytes":4*1024**2,"maximumSourceRecords":MAX_SOURCE_RECORDS}
-NUMERICAL_PROFILE = {"id":"teaching-upwind-stabilization-v1","convection":"bounded Gauss upwind for U, k and omega",
+NUMERICAL_PROFILE = {"id":"teaching-upwind-pressure-gradient-stabilization-v2","convection":"bounded Gauss upwind for U, k and omega",
     "convectiveOrder":1,"pressureLinearTolerance":1e-8,"pressureRelativeTolerance":0.,"pressureMaximumIterations":100,
     "transportLinearTolerance":1e-7,"transportRelativeTolerance":.01,"transportMinimumIterations":1,"transportMaximumIterations":100,
     "pressureRelaxation":.2,"transportRelaxation":.3,"steadyIterationCount":500,
-    "basis":"A predeclared first-order numerical stabilization trial after run38190272870 retained large negative-k bounding and unconverged pressure/continuity; no physical BC or operating input is changed.",
-    "accuracyQualified":False,"convergencePredicted":False,"priorRejectedRunId":"38190272870",
+    "pressureGradient":{"field":"p","scheme":"cellLimited Gauss linear 1","limiterCoefficient":1,
+        "basis":"Native cell/neighbour and coupled-patch bounds limit extrapolated face values by scaling the pressure gradient; no stored pressure or velocity field is clipped.",
+        "nativeFieldClippingPerformed":False},
+    "velocityGradient":"cellLimited Gauss linear 1","velocityGradientChanged":False,
+    "basis":"A predeclared fresh first-order candidate after run38197674270 reached500/End with the correct uniform outlet but retained large near-cap owner velocity and failed pressure residual, head stationarity and liquid-domain criteria. The new delta is only the pressure gradient scheme; this is not a proven diagnosis or convergence prediction. Physical BCs, operating inputs, mesh,500 iterations,1200s budget and acceptance criteria are unchanged.",
+    "accuracyQualified":False,"convergencePredicted":False,"priorRejectedRunId":"38197674270",
+    "priorNumericalProfileId":"teaching-upwind-stabilization-v1",
     "sources":["https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/interpolation/surfaceInterpolation/limitedSchemes/upwind/upwind.H",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/finiteVolume/convectionSchemes/boundedConvectionScheme/boundedConvectionScheme.C",
-        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/MomentumTransportModels/momentumTransportModels/Base/kOmegaSST/kOmegaSSTBase.C"]}
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/MomentumTransportModels/momentumTransportModels/Base/kOmegaSST/kOmegaSSTBase.C",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/finiteVolume/gradSchemes/limitedGradSchemes/cellLimitedGrad/cellLimitedGrad.C",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/applications/modules/incompressibleFluid/momentumPredictor.C",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/applications/modules/incompressibleFluid/correctPressure.C"]}
 ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,"muPaS":.001002,"gMS2":9.81,
     "speedRpm":1450.,"massFlowKgS":90.,"volumetricFlowM3S":90/998.2,"temperatureK":293.15,"vapourPressurePa":2339.,
     "axis":[0,0,1],"originM":[0,0,0],"solverGravityMS2":[0,0,0],"gravityInSolver":False,
@@ -63,7 +71,7 @@ SAMPLING = {"flowUnits":"m3/s outward positive","weighting":"signed-outward-phi"
     "kineticMoment":"mean(U_absolute_squared)","pressureUnit":"Pa","pressureBasis":"absolute",
     "totalPressureField":"998.2*pKinematic + 0.5*998.2*mean(U_absolute_squared) + 300000",
     "staticPressureField":"998.2*pKinematic; add300000Pa exactly once in reduction","iterationIndexIsPhysicalTime":False}
-CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind numerical trial and a uniform normal outlet profile assumption bound to every actual rectangular outlet facet. The outlet profile is not measured and does not predict convergence. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
+CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind pressure-gradient candidate and a uniform normal outlet profile assumption bound to every actual rectangular outlet facet. Only grad(p) adds native cellLimited reconstruction; the existing grad(U), other controls and all acceptance criteria are retained, with no stored-field clipping. The outlet profile is not measured and neither numerical choice predicts convergence. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
 encoded,record,json_file = geometry_case.encoded,geometry_case.record,geometry_case.json_file
 
 
@@ -249,6 +257,15 @@ def case_files(component,*,default_faces=True):
         previous=("div(phi,"+variable+") bounded Gauss "+scheme+";").encode("ascii")
         require(result["system/fvSchemes"].count(previous)==1,"Require the reviewed original numerical recipe before this explicit stabilization override.")
         result["system/fvSchemes"]=result["system/fvSchemes"].replace(previous,("div(phi,"+variable+") bounded Gauss upwind;").encode("ascii"))
+    # A separate, predeclared candidate: change pressure reconstruction only.
+    # Native cellLimited scales its computed gradient, not stored field values.
+    gradients=b"gradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1;}"
+    require(result["system/fvSchemes"].count(gradients)==1
+        and len(re.findall(rb"\bgradSchemes\s*\{",result["system/fvSchemes"]))==1
+        and not re.search(rb"\bgrad\s*\(\s*p\s*\)",result["system/fvSchemes"]),
+        "Require the exact single reviewed gradient block without a prior grad(p) override.")
+    result["system/fvSchemes"]=result["system/fvSchemes"].replace(gradients,
+        gradients[:-1]+b" grad(p) cellLimited Gauss linear 1;}")
     result["system/fvSolution"]=(base.foam_header("fvSolution")
         + 'solvers {p {solver GAMG; tolerance 1e-8; relTol 0; smoother GaussSeidel; maxIter 100;} "(U|k|omega)" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-7; relTol 0.01; minIter 1; maxIter 100;}}\n'
         + 'SIMPLE {nNonOrthogonalCorrectors 2;}\nrelaxationFactors {fields {p 0.2;} equations {U 0.3; k 0.3; omega 0.3;}}\n').encode("ascii")

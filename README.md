@@ -929,6 +929,19 @@ one-CPU, 4-GiB, 1-GiB limits and numerical acceptance thresholds are unchanged.
 The combined source/runner/phase/import/sliding/reduction regression has 120
 passing tests. Those contract results do not qualify the rejected CFD fields.
 
+The next declared fresh candidate is
+`teaching-upwind-pressure-gradient-stabilization-v2`. It adds only
+`grad(p) cellLimited Gauss linear 1` to the previous scheme; `grad(U)` was
+already limited. Every physical boundary, mesh, operating quantity, other
+solver control, 500-iteration limit and acceptance criterion is retained.
+The native limiter scales gradient reconstruction using neighbour bounds;
+stored pressure/velocity values are not clipped or replaced. The relevant
+near-outlet cells have positive native tetrahedral volumes and no detected
+local geometry-quality defect, while their unrestricted pressure-gradient
+reconstructions overshoot neighbouring values. This supports a controlled
+candidate trial, not a proven cause or promised convergence. The preparation
+and runner regression passes 48 tests before any new native result is known.
+
 ### Conditional active cavitation reference
 
 The manual `Authored classroom pump active cavitation reference` workflow

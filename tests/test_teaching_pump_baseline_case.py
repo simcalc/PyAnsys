@@ -172,7 +172,7 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             self.assertIn(b'endTime 500;',fresh['system/controlDict'])
         profile=case.ASSUMPTIONS['numericalStabilization']
         self.assertEqual(profile['convectiveOrder'],1);self.assertFalse(profile['accuracyQualified']);self.assertFalse(profile['convergencePredicted'])
-        self.assertEqual(profile['priorRejectedRunId'],'38190272870')
+        self.assertEqual(profile['priorRejectedRunId'],'38197674270')
         self.assertEqual(case.LIMITS['maximumSeconds'],1200)
 
     def test_pressure_and_transport_linear_stopping_and_underrelaxation_are_separate(self):
@@ -183,6 +183,52 @@ class TeachingBaselineCaseTests(unittest.TestCase):
         self.assertIn('tolerance 1e-7;',transport);self.assertIn('relTol 0.01;',transport)
         self.assertIn('minIter 1;',transport);self.assertIn('maxIter 100;',transport)
         self.assertIn('fields {p 0.2;}',raw);self.assertIn('equations {U 0.3; k 0.3; omega 0.3;}',raw)
+
+    def test_pressure_gradient_candidate_is_the_only_new_native_numerical_delta(self):
+        # Complete prior authored scheme contract; no native solver is run.
+        previous = (case.base.foam_header('fvSchemes')
+            + 'ddtSchemes {default steadyState;}\n'
+            + 'gradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1;}\n'
+            + 'divSchemes {default none; div(phi,U) bounded Gauss upwind; div(phi,k) bounded Gauss upwind; div(phi,omega) bounded Gauss upwind; div((nuEff*dev2(T(grad(U))))) Gauss linear;}\n'
+            + 'laplacianSchemes {default Gauss linear limited corrected 0.5;}\n'
+            + 'interpolationSchemes {default linear;}\n'
+            + 'snGradSchemes {default limited corrected 0.5;}\n'
+            + 'wallDist {method meshWave;}\n').encode('ascii')
+        for component in ('impeller','volute'):
+            with self.subTest(component=component):
+                fresh=case.case_files(component)
+                self.assertEqual(fresh['system/fvSchemes'].count(b'grad(p) cellLimited Gauss linear 1;'),1)
+                self.assertEqual(fresh['system/fvSchemes'].count(b'grad(U) cellLimited Gauss linear 1;'),1)
+                self.assertEqual(fresh['system/fvSchemes'].replace(b' grad(p) cellLimited Gauss linear 1;',b''),previous)
+                self.assertEqual(fresh['system/controlDict'],case.physics.case_files(component,300000)['system/controlDict'].encode('ascii'))
+                self.assertEqual(fresh['0/p'],case.physics.case_files(component,300000)['0/p'].encode('ascii'))
+        profile=case.NUMERICAL_PROFILE
+        self.assertEqual(profile['id'],'teaching-upwind-pressure-gradient-stabilization-v2')
+        self.assertEqual(profile['pressureGradient']['scheme'],'cellLimited Gauss linear 1')
+        self.assertEqual(profile['pressureGradient']['limiterCoefficient'],1)
+        self.assertFalse(profile['pressureGradient']['nativeFieldClippingPerformed'])
+        self.assertFalse(profile['velocityGradientChanged']);self.assertFalse(profile['accuracyQualified'])
+        self.assertFalse(profile['convergencePredicted'])
+        self.assertEqual((profile['steadyIterationCount'],case.LIMITS['maximumSeconds']),(500,1200))
+        self.assertEqual((case.PARAMETERS['speedRpm'],case.PARAMETERS['massFlowKgS']),(1450.,90.))
+        self.assertEqual(case.ASSUMPTIONS['externalTotalPressureAbsolutePa'],300000.)
+
+    def test_changed_duplicate_or_predeclared_pressure_gradient_is_not_silently_overridden(self):
+        original=case.physics.case_files
+        old='gradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1;}'
+        variants=[old.replace('default Gauss linear','default leastSquares'),
+            old.replace('grad(U) cellLimited Gauss linear 1','grad(U) cellLimited Gauss linear 0.5'),
+            old+'\ngradSchemes {default Gauss linear;}',
+            old+'\ngrad(p) Gauss linear;',
+            old.replace('}', ' grad(p) cellLimited Gauss linear 1;}')]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                def changed(component,pressure):
+                    result=original(component,pressure)
+                    result['system/fvSchemes']=result['system/fvSchemes'].replace(old,variant)
+                    return result
+                with mock.patch.object(case.physics,'case_files',side_effect=changed),self.assertRaisesRegex(case.BaselineCaseIssue,'gradient block'):
+                    case.case_files('impeller')
 
     def test_unreviewed_upstream_scheme_is_rejected_before_numerical_override(self):
         original=case.physics.case_files
