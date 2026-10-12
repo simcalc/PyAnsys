@@ -118,7 +118,10 @@ jobs:
             "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/run_teaching_pump_baseline.py \
             --geometry-native-directory "$RUNNER_TEMP/teaching-pump-native" --output-directory "$RUNNER_TEMP/teaching-pump-baseline"
       - name: Reduce actual authored MRF evidence and require numerical acceptance
-        run: '"$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_baseline.py --execution-directory "$RUNNER_TEMP/teaching-pump-baseline"'
+        run: |
+          sudo --preserve-env=PATH,RUNNER_TEMP,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID \
+            /usr/bin/timeout --kill-after=10s 360s \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_baseline.py --execution-directory "$RUNNER_TEMP/teaching-pump-baseline"
       - name: Retain authored CAD, parameters and actual component meshes
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

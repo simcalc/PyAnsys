@@ -121,7 +121,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_baseline.py --execution-directory "$RUNNER_TEMP/teaching-pump-baseline"
+          sudo --preserve-env=PATH,RUNNER_TEMP,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID \
+            /usr/bin/timeout --kill-after=10s 360s \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_baseline.py --execution-directory "$RUNNER_TEMP/teaching-pump-baseline"
           reduction_status=$?
           set -euo pipefail
           "$RUNNER_TEMP/teaching-pump-python/bin/python" -B - <<'PY'
@@ -161,7 +163,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_phase.py --execution-directory "$RUNNER_TEMP/teaching-pump-phase"
+          sudo --preserve-env=PATH,RUNNER_TEMP,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SHA,GITHUB_RUN_ID \
+            /usr/bin/timeout --kill-after=10s 360s \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_phase.py --execution-directory "$RUNNER_TEMP/teaching-pump-phase"
           reduction_status=$?
           set -euo pipefail
           "$RUNNER_TEMP/teaching-pump-python/bin/python" -B - <<'PY'
