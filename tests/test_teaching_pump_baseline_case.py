@@ -106,11 +106,25 @@ class TeachingBaselineCaseTests(unittest.TestCase):
 
     def test_pure_physics_has_explicit_fixed_operating_pressure_and_stationary_intake(self):
         files=case.case_files('impeller');self.assertIn(b'pRef 300000;',files['system/controlDict']);self.assertNotIn(b'pRef 101325;',files['system/controlDict'])
-        self.assertIn(b'nonRotatingPatches (inlet inblock-hub inblock-shroud);',files['constant/MRFProperties'])
+        self.assertNotIn(b'nonRotatingPatches',files['constant/MRFProperties'])
+        _,walls=case.fields.boundary_blocks(files['0/U'],'U')
+        self.assertEqual(walls['inlet']['type'],'pressureInletOutletVelocity')
+        self.assertEqual(walls['inblock-hub']['type'],'noSlip');self.assertEqual(walls['inblock-shroud']['type'],'noSlip')
+        for patch in ('blade','impeller-hub','impeller-shroud'):self.assertEqual(walls[patch]['type'],'MRFnoSlip')
         self.assertIn(b'omega 1450 [rpm];',files['constant/MRFProperties']);self.assertIn(b'fields true;',files['system/createNonConformalCouplesDict'])
         self.assertIn(b'endTime 500;',files['system/controlDict']);self.assertIn(b'type MRFnoSlip;',files['0/U']);self.assertIn(b'type noSlip;',files['0/U'])
         self.assertIn('not measured or verified',case.ASSUMPTIONS['headDatum']);self.assertEqual(case.ASSUMPTIONS['solverGravityMS2'],[0,0,0])
+        self.assertIn('actual stationary BCs',case.ASSUMPTIONS['wallAdaptation'])
         self.assertEqual([a[0] for a in case.commands('fresh')],['mergeMeshes','createNonConformalCouples','checkMesh','foamRun'])
+
+    def test_native_sst_wall_distance_recipe_is_present_for_both_components(self):
+        for component in ('impeller','volute'):
+            files=case.case_files(component)
+            self.assertEqual(len(case.re.findall(rb'\bwallDist\s*\{',files['system/fvSchemes'])),1)
+            self.assertIn(b'wallDist {method meshWave;}',files['system/fvSchemes'])
+            self.assertIn(b'model kOmegaSST;',files['constant/momentumTransport'])
+            self.assertIn(b'endTime 500;',files['system/controlDict'])
+        self.assertNotIn('wallDist',case.physics.case_files('impeller')['system/fvSchemes'])
 
     def fixture(self,root):
         with self.environment(str(root)):

@@ -42,7 +42,7 @@ ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,
     "absolutePressureEquation":"p_static_absolute_Pa = 998.2*p_kinematic_m2s2 + 300000; reference added exactly once",
     "inletTurbulence":{"kM2S2":.375,"omegaSInverse":100.,"basis":"Prescribed classroom initial/section values; not measured."},
     "headDatum":"Declared common zero inlet/outlet section reference with native gravity neglected; actual section centroid elevations are not measured or verified.",
-    "wallAdaptation":"Blade, impeller-hub and impeller-shroud use rotating MRFnoSlip; intake and volute walls use stationary noSlip. Intake/inlet patches are explicitly nonRotatingPatches.",
+    "wallAdaptation":"Blade, impeller-hub and impeller-shroud use rotating MRFnoSlip; intake and volute walls use stationary noSlip. Inlet pressureInletOutletVelocity and intake noSlip impose actual stationary BCs; Foundation12 does not use a nonRotatingPatches MRF keyword.",
     "geometryBasis":"New authored CAD, exact current exported mesh and matched initial interface; not official Ansys/Grundfos geometry or measured pump performance."}
 SAMPLING = {"flowUnits":"m3/s outward positive","weighting":"signed-outward-phi","velocityFrame":"absolute",
     "kineticMoment":"mean(U_absolute_squared)","pressureUnit":"Pa","pressureBasis":"absolute",
@@ -147,8 +147,12 @@ def validate_source(directory):
 def case_files(component,*,default_faces=True):
     require(component in geometry_case.COMPONENTS and type(default_faces) is bool,"Use an exact component and actual optional empty defaultFaces declaration.")
     result={p:text.encode("ascii") for p,text in physics.case_files(component,300000).items()}
+    # Foundation12 wallDist reads fvSchemes.wallDist when SST requests distance.
+    # This new authored lane supplies the native method; old routes are unchanged.
+    require(not re.search(rb"\bwallDist\s*\{",result["system/fvSchemes"]),"The reviewed baseline recipe must define wallDist exactly once.")
+    result["system/fvSchemes"]+=b"wallDist {method meshWave;}\n"
     if component=="impeller":
-        result["constant/MRFProperties"]=(base.foam_header("MRFProperties")+"rotor {cellZone rotating-fluid; origin (0 0 0); axis (0 0 1); omega 1450 [rpm]; nonRotatingPatches (inlet inblock-hub inblock-shroud);}\n").encode("ascii")
+        result["constant/MRFProperties"]=(base.foam_header("MRFProperties")+"rotor {cellZone rotating-fluid; origin (0 0 0); axis (0 0 1); omega 1450 [rpm];}\n").encode("ascii")
     if not default_faces:
         for path in ("0/U","0/p","0/k","0/omega","0/nut"):
             text,count=re.subn(rb'    "defaultFaces"\s*\{[^{}]*\}\s*',b"",result[path]);require(count==1,"Only the absent empty defaultFaces may be omitted.");result[path]=text

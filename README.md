@@ -820,3 +820,14 @@ The retained native point set contains exactly 3278 labels: the two disjoint
 source count, actual interface face labels, point set and VTK point IDs as
 separate diagnostic evidence. Unknown VTK roles and inconsistent counts remain
 rejected. No mesh-quality or numerical acceptance threshold changes.
+
+The next actual baseline run
+[38189024819](https://github.com/simcalc/PyAnsys/actions/runs/38189024819)
+passed the fresh geometry gates and 788 tests, then entered the native SST/MRF
+solver. Before its first iteration, OpenFOAM stopped because the authored
+`fvSchemes` omitted the required `wallDist` dictionary. The corrected authored
+recipe supplies the Foundation 12 `meshWave` wall-distance method for both
+components. It also removes the unused `nonRotatingPatches` MRF keyword;
+the existing intake `noSlip` and inlet `pressureInletOutletVelocity` conditions
+determine their stationary velocity basis. A new actual native run is required;
+this configuration correction does not establish convergence or pump head.
