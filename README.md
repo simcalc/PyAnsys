@@ -1170,3 +1170,32 @@ recipes and default refinement proof bytes stay unchanged. New lean packages
 must retain their own generator identity and pass the complete native
 `checkMesh`, physical boundary and NCC coverage gates; the 0.05 native weight
 criterion and all execution limits remain unchanged.
+
+### Separate inlet-flow/static-outlet MRF research candidate
+
+The manual `teaching-pump-free-inlet-flow.yml` workflow uses fresh authored
+lean geometry and its complete native acceptance before starting a separate
+physics case. In this distinct boundary family, `flowRateInletVelocity`
+prescribes `Q = 90/998.2 m3/s` on the actual inlet patch area and normals.
+The outlet uses pressure-coupled velocity and static kinematic pressure zero.
+The declared outlet absolute reference is 300000 Pa, so the reducer reconstructs
+`p_abs = 998.2*p_kinematic + 300000` exactly once. Actual sampled inlet static
+pressure and flux-weighted `mean(|U_absolute|²)` supply suction NPSHA; the
+outlet reference is not treated as a prescribed suction pressure.
+
+Recipe, preparation, runtime, execution, study, manifest and acceptance have
+their own boundary-family identities and filenames. No rejected historical
+physics field, head, H0 or old inlet-total-pressure admission is copied.
+The original v3 SST, MRF, walls, schemes, 500 iteration window, residual,
+head stationarity, conservation and noncavitating pressure gates are retained.
+Execution remains limited to one CPU, four GiB, 1200 seconds and one GiB of
+workspace. Native generated region/cache/function data are independently
+bound; final closure rechecks the full inventories and installed binaries.
+
+The 60 focused synthetic contract tests passed, including changed source,
+runtime, pressure mapping and late-added endpoint evidence. These tests and
+the recipe do not establish convergence. Only a new actual native run and
+its independent reducer can qualify a numerical baseline on that exact mesh.
+Numerical head/NPSHA stages preserve Input → Equation → Substitution → Result.
+NPSHr/NPSH3, wall resolution, mesh/time convergence, active-phase H0, physical
+transient, matched restart and manufacturer pump validation remain separate.
