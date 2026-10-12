@@ -11,6 +11,11 @@ import json
 import math
 
 SCHEMA = 'untirta.teaching-tetra-corner-subdivision.v1'
+BALANCING_SCHEMA = 'untirta.teaching-tetra-transition-balancing.v1'
+MINIMUM_WEIGHT = .05
+BALANCING_LIMITS = {'maximumOriginalCells':450000,'maximumFinalCells':450000,
+    'maximumFinalPoints':500000,'maximumClosurePasses':64}
+WEIGHT_SOURCE = 'https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/meshCheck/polyMeshCheck/polyMeshCheck.C#L162'
 
 
 def require(value, message):
@@ -41,7 +46,74 @@ def exterior_inventory(data):
     return exterior
 
 
-def refine_component(data,next_node,original_global_maximum_node):
+def internal_distances(data):
+    """Actual triangular face planes and both tetrahedron centres; no volume proxy."""
+    points=data['points'];centres=[tuple(math.fsum(points[n][i] for n in t)/4 for i in range(3)) for t in data['tets']]
+    pending={};closed=set();pairs=[]
+    for cell,tet in enumerate(data['tets']):
+        for face in faces(tet):
+            key=tuple(sorted(face));require(key not in closed,'Every internal triangle must have exactly two incident cells.')
+            if key not in pending:pending[key]=(cell,face);continue
+            neighbour=cell;owner,other=pending.pop(key);closed.add(key)
+            # Opposite cyclic triangle winding is required on the two cell sides.
+            require(any(face==other[::-1][i:]+other[::-1][:i] for i in range(3)), 'Internal face winding must be opposite for its two positive cells.')
+            a,b,c=(points[n] for n in other);u=tuple(b[i]-a[i] for i in range(3));v=tuple(c[i]-a[i] for i in range(3))
+            sf=((u[1]*v[2]-u[2]*v[1])/2,(u[2]*v[0]-u[0]*v[2])/2,(u[0]*v[1]-u[1]*v[0])/2)
+            area=math.sqrt(math.fsum(s*s for s in sf));cf=tuple(math.fsum(points[n][i] for n in other)/3 for i in range(3))
+            require(math.isfinite(area) and area>0,'Each shared original triangle must have positive finite area.')
+            do=math.fsum(sf[i]*(cf[i]-centres[owner][i]) for i in range(3))/area
+            dn=math.fsum(sf[i]*(centres[neighbour][i]-cf[i]) for i in range(3))/area
+            require(all(math.isfinite(d) and d>0 for d in (do,dn)), 'Actual cell centres must lie strictly on opposite sides of their shared triangle.')
+            pairs.append((owner,neighbour,key,do,dn))
+    return sorted(pairs,key=lambda row:row[2])
+
+
+def transition_selection(data,initial):
+    """One-level closure: subdivide only the larger-distance unsplit neighbour."""
+    require(0<len(data['tets'])<=BALANCING_LIMITS['maximumOriginalCells'], 'Bound original cells before allocating a lean balancing adjacency.')
+    require(len(data['points'])<=BALANCING_LIMITS['maximumFinalPoints'], 'Bound original nodes before lean balancing.')
+    require(isinstance(initial,set) and all(type(i) is int and 0<=i<len(data['tets']) for i in initial),'Initial split parents must be exact original tetrahedron rows.')
+    pairs=internal_distances(data);selected=set(initial);passes=0
+    def weights():
+        return [min(a,b)/(a+b) for _,_,_,a,b in effective()]
+    def effective():
+        return ((a,b,key,do/(4 if a in selected else 1),dn/(4 if b in selected else 1)) for a,b,key,do,dn in pairs)
+    def caps():
+        require(len(data['tets'])+3*len(selected)<=BALANCING_LIMITS['maximumFinalCells'] and len(data['points'])+len(selected)<=BALANCING_LIMITS['maximumFinalPoints'],
+            'The explicit lean balancing cell/node cap cannot be exceeded by a closure proposal.')
+    caps();initial_weights=weights()
+    while True:
+        additions=set();unresolved=[]
+        for a,b,key,do,dn in effective():
+            if min(do,dn)/(do+dn)>=MINIMUM_WEIGHT:continue
+            larger=a if do>dn else b
+            if larger not in selected:additions.add(larger)
+            else:unresolved.append(key)
+        if not additions:
+            require(not unresolved,'One-level centroid balancing cannot meet the unchanged .05 interpolation-weight gate for these original cells.')
+            break
+        require(passes<BALANCING_LIMITS['maximumClosurePasses'],'The fixed lean balancing closure-pass cap was reached; no partial mesh is admitted.')
+        selected.update(sorted(additions));passes+=1;caps()
+    final_weights=weights();extra=sorted(selected-initial)
+    proof={'schemaVersion':BALANCING_SCHEMA,'enabled':True,'method':'ORIGINAL_TET_NORMAL_DISTANCE_ONE_LEVEL_FIXED_POINT',
+        'minimumInterpolationWeight':MINIMUM_WEIGHT,'limits':dict(BALANCING_LIMITS),'originalInternalFaceCount':len(pairs),
+        'originalAdjacencySha256':sha256(encoded([[a+1,b+1,*key] for a,b,key,_,_ in pairs])).hexdigest(),
+        'initialCornerSplitParentCount':len(initial),'additionalBalancedParentCount':len(extra),'closurePasses':passes,
+        'selectedParentRowsOneBasedSha256':sha256(encoded([i+1 for i in sorted(selected)])).hexdigest(),
+        'additionalParentRowsOneBasedSha256':sha256(encoded([i+1 for i in extra])).hexdigest(),
+        'additionalParentRowsOneBasedSample':[i+1 for i in extra[:32]],'sampleIsComplete':len(extra)<=32,
+        'minimumProspectiveWeightBeforeBalancing':min(initial_weights,default=None),
+        'minimumProspectiveWeightAfterBalancing':min(final_weights,default=None),
+        'prospectiveLowWeightFaceCountBeforeBalancing':sum(w<MINIMUM_WEIGHT for w in initial_weights),
+        'prospectiveLowWeightFaceCountAfterBalancing':sum(w<MINIMUM_WEIGHT for w in final_weights),
+        'equation':'dOwn=abs(Sf.(Cf-Co))/|Sf|; dNei=abs(Sf.(Cn-Cf))/|Sf|; w=min(dOwn,dNei)/(dOwn+dNei); centroid face-child normal distance=dParent/4',
+        'source':WEIGHT_SOURCE,'calculationAuthority':'Python geometry only',
+        'nativeInterpolationWeightVerified':False,'nativeMeshQualityVerified':False,'actualCfdRunVerified':False}
+    return selected,proof
+
+
+def refine_component(data,next_node,original_global_maximum_node,*,balance_transitions=False):
+    require(type(balance_transitions) is bool,'Lean transition balancing requires an explicit boolean opt-in.')
     points=dict(data['points']);tets=data['tets'];exterior=exterior_inventory(data)
     require(type(original_global_maximum_node) is int and max(points)<=original_global_maximum_node
         and type(next_node) is int and next_node>original_global_maximum_node,'New centroid labels must follow every original global node label.')
@@ -49,8 +121,10 @@ def refine_component(data,next_node,original_global_maximum_node):
     original_volumes=[volume(t,points) for t in tets]
     require(all(math.isfinite(v) and v>0 for v in original_volumes),'Each original tetrahedron must have positive finite volume.')
     boundary_counts=[sum(tuple(sorted(f)) in exterior for f in faces(t)) for t in tets]
-    for tet,count in zip(tets,boundary_counts):
-        if count<2:
+    selected_rows={i for i,count in enumerate(boundary_counts) if count>=2};balancing=None
+    if balance_transitions:selected_rows,balancing=transition_selection(data,selected_rows)
+    for row,tet in enumerate(tets):
+        if row not in selected_rows:
             result.append(tet)
             continue
         require(next_node not in points,'New centroid labels cannot replace original points.')
@@ -79,6 +153,14 @@ def refine_component(data,next_node,original_global_maximum_node):
         'originalFluidVolumeM3':old_total,'finalFluidVolumeM3':new_total,'relativeVolumeDifference':relative,
         'originalPointCoordinatesPreserved':True,'physicalExteriorTrianglesPreserved':True,
         'nativeMeshQualityVerified':False,'actualCfdRunVerified':False,'mainApplicationWrites':False}
+    if balancing is not None:
+        final_weights=[min(do,dn)/(do+dn) for _,_,_,do,dn in internal_distances(output)]
+        require(all(w>=MINIMUM_WEIGHT for w in final_weights),'Every actual derived internal face must pass the unchanged geometric .05 weight gate.')
+        balancing['finalInternalFaceCount']=len(final_weights)
+        balancing['minimumFinalInternalFaceWeight']=min(final_weights,default=None)
+        balancing['finalGeometricLowWeightFaceCount']=sum(w<MINIMUM_WEIGHT for w in final_weights)
+        balancing['allDerivedInternalFacePlanesChecked']=True
+        evidence['transitionBalancing']=balancing
     return output,evidence,next_node
 
 
@@ -101,7 +183,9 @@ def replay_component(data,evidence):
     require(raw_nodes and max(raw_nodes)<=threshold and set(data['points'])==raw_nodes|set(range(evidence['firstInsertedNodeLabel'],next_node)),
         'Published points must contain only complete original and inserted cell nodes.')
     original={'points':{n:data['points'][n] for n in sorted(raw_nodes)},'tets':raw_tets,'patches':data['patches']}
-    replay,expected,end=refine_component(original,evidence['firstInsertedNodeLabel'],threshold)
+    replay,expected,end=refine_component(original,evidence['firstInsertedNodeLabel'],threshold,balance_transitions='transitionBalancing' in evidence)
+    if 'transitionBalancing' in evidence:
+        require(encoded(expected['transitionBalancing'])==encoded(evidence['transitionBalancing']), 'Every typed balancing input, selection, bound and result must replay exactly.')
     require(replay=={'points':data['points'],'tets':data['tets'],'patches':data['patches']} and expected==evidence and end==next_node,
         'Published topology, centroids, volume and complete evidence must reproduce the original corner recipe exactly.')
     return original,end

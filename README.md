@@ -1152,3 +1152,21 @@ bounds. The reader starts no process. Coordinate-equation facts and a complete
 stored role inventory do not qualify native provenance, installed runtime,
 field-state semantics, ALE conservation, wall flux, a matched restart or CFD
 performance. Those flags remain false until separately measured and admitted.
+
+### Lean centroid transition balancing before native acceptance
+
+Only the three explicit lean candidates enable bounded original tetrahedron
+adjacency balancing. A centroid split reduces the normal distance from an
+original face to its face-child centre by four. Where that transition would
+give `min(dOwn,dNei)/(dOwn+dNei) < 0.05`, the deterministic closure also splits
+the larger-distance original neighbour, once. It then checks every derived
+internal face. Original coordinates, physical surface triangles, paired
+interface facets, orientation and fluid volume remain bound and unchanged.
+
+Pure replay of the retained failed lean-coarse source selected two additional
+rotor parents and six extra tetrahedra. This is a geometry calculation, not an
+executed replacement mesh or native quality approval. The old three mesh
+recipes and default refinement proof bytes stay unchanged. New lean packages
+must retain their own generator identity and pass the complete native
+`checkMesh`, physical boundary and NCC coverage gates; the 0.05 native weight
+criterion and all execution limits remain unchanged.

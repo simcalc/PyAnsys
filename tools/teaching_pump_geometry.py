@@ -101,10 +101,14 @@ def resolution_sizing(mesh_level):
     """Lean planning metadata only; actual count and all native gates are separate."""
     require(isinstance(mesh_level,str) and mesh_level in MESH_LEVELS,"Choose an exact reviewed mesh resolution ID.")
     if mesh_level not in LEAN_MESH_LEVELS:return None
+    import teaching_tetra_corner_refinement as corner
     return {"family":"lean-three","declaredCombinedCellTargetRange":[50000,250000],
         "targetIsMeasuredCellCount":False,"targetIsAcceptanceGate":False,"countsPredictedOrGuaranteed":False,
         "nativeLimitsUnchanged":True,"meshConvergenceDemonstrated":False,"sameDiscreteBoundaryClaimed":False,
         "oldNativePacketCompatibilityClaimed":False,
+        "centroidTransitionBalancing":{"enabled":True,"method":"ORIGINAL_TET_NORMAL_DISTANCE_ONE_LEVEL_FIXED_POINT",
+            "minimumInterpolationWeight":corner.MINIMUM_WEIGHT,"limits":dict(corner.BALANCING_LIMITS),
+            "nativeMeshQualityVerified":False,"countsPredictedOrGuaranteed":False},
         "scope":"Coarser sizing candidates on the exact same authored CAD. Actual counts, surface tessellation, native quality/interface coverage and refinement results must be measured independently; the target range is not an acceptance or count promise."}
 
 
@@ -310,7 +314,7 @@ def parse_msh(component, raw):
     return component_data(component,points,tets,surfaces)
 
 
-def mesh_data(gmsh, cad):
+def mesh_data(gmsh, cad, *, balance_transitions=False):
     import teaching_tetra_corner_refinement as corner
     tags,xyz,_=gmsh.model.mesh.getNodes();require(len(tags)<=LIMITS["maximumCombinedNodes"] and len(xyz)==3*len(tags),"Actual whole-model points must remain bounded.")
     points={int(n):tuple(float(v) for v in xyz[i*3:i*3+3]) for i,n in enumerate(tags)}
@@ -333,7 +337,7 @@ def mesh_data(gmsh, cad):
     original_max=max(n for item in result.values() for n in item["points"])
     next_node=original_max+1
     for name,item in list(result.items()):
-        refined,proof,next_node=corner.refine_component(item,next_node,original_max)
+        refined,proof,next_node=corner.refine_component(item,next_node,original_max,balance_transitions=balance_transitions)
         result[name]=component_data(name,refined["points"],refined["tets"],refined["patches"])
         result[name]["cornerSubdivisionEvidence"]=proof
     require(sum(v["metrics"]["cellCount"] for v in result.values())<=LIMITS["maximumCombinedCells"],"Actual combined classroom cells exceed500000; no automatic mesh-size fallback.")
@@ -370,7 +374,7 @@ def generate(parameters, output_directory, mesh_level="coarse"):
                           "Geometry.Tolerance":1e-9,"Mesh.Algorithm3D":10,"Mesh.Optimize":1,"Mesh.ElementOrder":1,
                           "Mesh.MeshSizeMin":plan["meshSizeM"]/2,"Mesh.MeshSizeMax":plan["meshSizeM"],
                           "Mesh.MeshSizeFromPoints":0,"Mesh.MeshSizeFromCurvature":40,"Mesh.MeshSizeExtendFromBoundary":0}.items():gmsh.option.setNumber(key,value)
-        cad=build_cad(gmsh,plan["parameters"]);gmsh.write(str(destination/"teaching-pump.brep"));gmsh.model.mesh.generate(3);data=mesh_data(gmsh,cad)
+        cad=build_cad(gmsh,plan["parameters"]);gmsh.write(str(destination/"teaching-pump.brep"));gmsh.model.mesh.generate(3);data=mesh_data(gmsh,cad,balance_transitions=mesh_level in LEAN_MESH_LEVELS)
         interface=common_interface(data["impeller"],data["volute"],cad["commonInterfaceSurfaceIds"]);components=[]
         for name,item in data.items():
             raw=msh_bytes(name,item);target=destination/(name+".msh")
@@ -408,6 +412,7 @@ def verify_output(directory):
     import teaching_tetra_corner_refinement as corner
     root=Path(directory).absolute();require(root.is_dir() and {p.name for p in root.iterdir()}=={*FILES,REPORT,MANIFEST},"Retain only the exact authored CAD/mesh manifest inventory.")
     report=json_file(root/REPORT);manifest=json_file(root/MANIFEST);plan=teaching_plan(manifest.get("parameters"),manifest.get("meshLevel"))
+    lean_inventory=[record(root/name) for name in (*FILES,REPORT,MANIFEST)] if plan['meshLevel'] in LEAN_MESH_LEVELS else None
     sizing=plan.get("resolutionSizing")
     require((manifest.get("resolutionSizing")==report.get("resolutionSizing")==sizing if sizing is not None
         else "resolutionSizing" not in manifest and "resolutionSizing" not in report),
@@ -445,6 +450,9 @@ def verify_output(directory):
         volume=number(row.get("cadFluidVolumeM3"));require(volume>0 and row.get("cadMeshRelativeVolumeDifference")==abs(volume-row["totalCellVolumeM3"])/volume<=.005,"The actual CAD/mesh volume check must remain bound.")
         evidence=row.get("cornerSubdivisionEvidence")
         require(isinstance(evidence,dict),"Declared boundary corner subdivision evidence is required.")
+        require((isinstance(evidence.get('transitionBalancing'),dict) and evidence['transitionBalancing'].get('enabled') is True
+            if plan['meshLevel'] in LEAN_MESH_LEVELS else 'transitionBalancing' not in evidence),
+            "Transition balancing is required only for the three explicit lean levels; legacy corner proofs remain unchanged.")
         if threshold is None:
             threshold=evidence.get("originalGlobalMaximumNodeLabel");next_node=threshold+1 if type(threshold) is int else None
         require(evidence.get("originalGlobalMaximumNodeLabel")==threshold and evidence.get("firstInsertedNodeLabel")==next_node,
@@ -468,6 +476,13 @@ def verify_output(directory):
                 "Current CAD surface aliases, volumes and component ownership must remain explicit and bound.")
     require(not set(cad["volumeGroups"]["impeller"]) & set(cad["volumeGroups"]["volute"]),"Rotating/stationary CAD volume identities must remain disjoint.")
     created=datetime.fromisoformat(report.get("createdAt",""));require(created.tzinfo is not None and created.utcoffset().total_seconds()==0,"The actual native generation time must be an explicit UTC timestamp.")
+    if lean_inventory is not None:
+        require({p.name for p in root.iterdir()}=={*FILES,REPORT,MANIFEST}
+            and [record(root/name) for name in (*FILES,REPORT,MANIFEST)]==lean_inventory,
+            "Every lean source file must retain its exact complete inventory and SHA256 through balancing replay.")
+        require(generator=={"path":"tools/teaching_pump_geometry.py","bytes":Path(__file__).stat().st_size,"sha256":sha256(Path(__file__).read_bytes()).hexdigest()}
+            and processor=={"path":"tools/teaching_tetra_corner_refinement.py","bytes":post_source.stat().st_size,"sha256":sha256(post_source.read_bytes()).hexdigest()},
+            "The generator and balancing source bytes must remain unchanged through lean replay.")
     return {"report":report,"reportFile":{"path":REPORT,**{k:v for k,v in record(root/REPORT).items() if k!="name"}},"components":rows}
 
 

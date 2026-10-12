@@ -48,7 +48,7 @@ def retained_fixture(root,mesh_level="coarse"):
     data = cubes(); plan = geometry.teaching_plan(mesh_level=mesh_level); components = []
     threshold = max(n for item in data.values() for n in item['points']); next_node = threshold + 1
     for name, item in list(data.items()):
-        refined, proof, next_node = corner.refine_component(item, next_node, threshold)
+        refined, proof, next_node = corner.refine_component(item, next_node, threshold,balance_transitions=mesh_level in geometry.LEAN_MESH_LEVELS)
         data[name] = geometry.component_data(name, refined['points'], refined['tets'], refined['patches'])
         data[name]['cornerSubdivisionEvidence'] = proof
     for name, item in data.items():
@@ -121,6 +121,11 @@ class TeachingParametersTests(unittest.TestCase):
             self.assertEqual(plan['parameters'],old['parameters']);self.assertEqual(plan['equationStages'],old['equationStages'])
             self.assertEqual(plan['limits'],old['limits']);self.assertEqual(plan['meshCellTargetRange'],[50000,250000])
             sizing=plan['resolutionSizing'];self.assertEqual(sizing['family'],'lean-three')
+            balancing=sizing['centroidTransitionBalancing']
+            self.assertIs(balancing['enabled'],True);self.assertEqual(balancing['minimumInterpolationWeight'],.05)
+            self.assertEqual(balancing['limits']['maximumFinalCells'],450000)
+            self.assertIs(balancing['nativeMeshQualityVerified'],False)
+            self.assertIs(balancing['countsPredictedOrGuaranteed'],False)
             self.assertFalse(sizing['targetIsMeasuredCellCount']);self.assertFalse(sizing['targetIsAcceptanceGate'])
             self.assertFalse(sizing['countsPredictedOrGuaranteed']);self.assertFalse(sizing['sameDiscreteBoundaryClaimed'])
             self.assertFalse(sizing['meshConvergenceDemonstrated']);self.assertFalse(sizing['oldNativePacketCompatibilityClaimed'])
@@ -233,6 +238,48 @@ class TeachingTopologyTests(unittest.TestCase):
 
 
 class TeachingEvidenceTests(unittest.TestCase):
+    def test_lean_source_mutation_during_balancing_replay_fails_post_hash(self):
+        for change in ('brep','report','addition'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)/'mesh';retained_fixture(root,'lean-coarse')
+                original=corner.replay_component;calls=0
+                def mutate(data,evidence):
+                    nonlocal calls
+                    result=original(data,evidence);calls+=1
+                    if calls==2:
+                        if change=='addition':(root/'extra.txt').write_bytes(b'unbound')
+                        else:
+                            target=root/('teaching-pump.brep' if change=='brep' else geometry.REPORT)
+                            target.write_bytes(target.read_bytes()+b' ')
+                    return result
+                with mock.patch.object(corner,'replay_component',side_effect=mutate),self.assertRaisesRegex(geometry.GeometryIssue,'through balancing replay'):
+                    geometry.verify_output(root)
+
+    def test_only_lean_levels_require_exact_balancing_replay_and_preserve_source_hashes(self):
+        for level in geometry.MESH_LEVELS:
+            with self.subTest(level=level),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)/'mesh';report,_=retained_fixture(root,level)
+                before={p.name:sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
+                geometry.verify_output(root)
+                for row in report['components']:
+                    self.assertEqual('transitionBalancing' in row['cornerSubdivisionEvidence'],level in geometry.LEAN_MESH_LEVELS)
+                self.assertEqual(before,{p.name:sha256(p.read_bytes()).hexdigest() for p in root.iterdir()})
+
+    def test_rehashed_missing_balancing_or_legacy_opt_in_or_mutated_result_rejects(self):
+        for change in ('missing','legacy-opt-in','threshold','sample','claim','typed'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                level='coarse' if change=='legacy-opt-in' else 'lean-coarse'
+                root=Path(temp)/'mesh';report,_=retained_fixture(root,level)
+                proof=report['components'][0]['cornerSubdivisionEvidence']
+                if change=='missing':proof.pop('transitionBalancing')
+                elif change=='legacy-opt-in':proof['transitionBalancing']={'enabled':True}
+                elif change=='threshold':proof['transitionBalancing']['minimumInterpolationWeight']=.01
+                elif change=='sample':proof['transitionBalancing']['additionalParentRowsOneBasedSample']=[1]
+                elif change=='claim':proof['transitionBalancing']['nativeMeshQualityVerified']=True
+                else:proof['transitionBalancing']['enabled']=1
+                (root/geometry.REPORT).write_bytes(geometry.encoded(report))
+                with self.assertRaises(ValueError):geometry.verify_output(root)
+
     def test_lean_sizing_target_does_not_replace_measured_topology_or_become_gate(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)/'mesh';report,manifest=retained_fixture(root,'lean-coarse')
