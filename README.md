@@ -850,6 +850,25 @@ iterations and numerical acceptance thresholds are unchanged. This is a
 declared stabilization trial; it does not establish spatial accuracy or allow
 negative absolute pressure to become an accepted single-phase baseline.
 
+The actual stabilization run
+[38193184426](https://github.com/simcalc/PyAnsys/actions/runs/38193184426)
+passed 907 contract tests and completed the native iteration-500 field checks.
+Its separate reducer could not publish the acceptance report because its
+output directory belonged to the bounded worker and the reducer ran as the
+unprivileged job user. This workflow failure does not by itself identify a
+numerical failure or a numerical pass. The reducers now use the same output
+owner within the explicit worker directory, with a separate 360-second
+deadline. Source data and numerical criteria remain unchanged. The retained
+whole archives and native data require independent numerical replay.
+
+The subsequent whole-archive replay of that run found an actual numerical
+failure: its final-window mean head was about -102679 m, its global absolute
+pressure minimum about -6.177e9 Pa, and residuals and head stationarity exceeded
+the unchanged acceptance limits. Correct integrated mass flow and finite fields
+did not qualify that baseline. Run 38194626972 also retained a numerical
+rejection after the output-owner correction. Neither run supplies an active
+cavitation H0 or permits a dependent pressure point or physical rotor pilot.
+
 ### Conditional active cavitation reference
 
 The manual `Authored classroom pump active cavitation reference` workflow
@@ -895,3 +914,41 @@ dependent comparison while its independent numerical facts remain available.
 A broad bracket does not establish pressure-resolution independence, physical
 validation, mesh/time convergence or restart. These workflows and contract tests
 do not themselves prove that any pressure sweep has been executed.
+
+### Conditional physical rotor pilot
+
+The manual `Authored classroom pump physical rotor pilot` workflow accepts
+the exact completed active-model reference run and commit. Its whole archive
+transfer and current installed-binary H0 replay are the same prerequisites
+used by pressure points. The current source reference is copied in full as
+immutable evidence; its fields and head are never a sliding result or initial
+solution. A measured five-write output projection must fit the one-GiB bound
+before a new case is created.
+
+The new case removes MRF and prescribes global-time rigid rotation at 1450 rpm
+about the declared +z axis and origin. Rotating physical walls use
+`movingWallVelocity`; stationary physical walls retain `noSlip`. The physical
+pilot starts from explicit uniform liquid/velocity/pressure/turbulence inputs.
+Its maximum time step is one period divided by 360 and its end time is 1.25
+periods. All five positive quarter-period states are retained, including the
+noninteger final rotor angle. These durations are inputs, not a periodicity or
+time-step-convergence test.
+
+Only the exact package-owned `checkMesh` and `foamRun` commands execute, with
+one CPU, four GiB, 1200 seconds, one GiB workspace and eight-MiB native logs.
+The current motion library has its own actual byte/ownership descriptor; this
+does not claim that every loaded library has been audited. Actual moved
+coordinates are compared label by label with `Rz(omega*t)*x0`, while stator
+coordinates must remain fixed. Dynamic NCC coverage is bound to every actual
+native `Time` block, the single current owner pair and its physical face counts.
+The original 0.99/0.999/1.01 coverage criteria remain in force.
+
+A separate pure audit checks finite SI endpoint fields and complete stored
+checkpoint roles: scientific fields, flux state, moved points, actual
+`<time>/fvMesh/polyFaces` and the native adaptive clock. Quarter-period writes
+do not provide the preceding native-step geometry for an ALE conservation or
+moving-wall flux proof. Missing data stays explicitly pending and does not
+erase valid independent coordinate evidence. A complete stored checkpoint is
+not an executed matched restart. This pilot and its contract tests do not
+qualify transient performance, sliding H0, NPSH3, wall resolution, mesh/time
+convergence, physical validation or restart.
