@@ -143,6 +143,8 @@ def declared_report(source,output):
 def generated_data(root,*,after_native_execution=False):
     """Only reviewed data roles after native work; never additional model inputs."""
     rows,evidence=[],[];root=Path(root);mesh=root/"case/constant/polyMesh"
+    region_rows,region_evidence=phase.native_region_data(root,after_native_execution=after_native_execution)
+    rows.extend(region_rows);evidence.extend(region_evidence)
     cache=root/phase.NATIVE_CACHE_PATH
     initial_counts=None;count_source=None
     if (root/"case/constant/fvMesh").exists():
@@ -325,7 +327,9 @@ def verify_output(directory,*,after_native_execution=False):
         if folder=="constant":
             names.add("polyMesh")
             if after_native_execution and (actual/"fvMesh").exists():names.add("fvMesh")
-        if folder=="0" and after_native_execution:names|={n for n in phase.STARTUP_FIELDS if (actual/n).exists()}
+        if folder=="0" and after_native_execution:
+            names|={n for n in phase.STARTUP_FIELDS if (actual/n).exists()}
+            if (actual/"cellToRegion").exists():names.add("cellToRegion")
         require({p.name for p in actual.iterdir()}==names,"Unreviewed extra initial field or executable dictionary is prohibited.")
         for p in actual.iterdir():require(not p.is_symlink() and not getattr(p,"is_junction",lambda:False)()
             and (p.is_dir() if folder=="constant" and p.name in {"polyMesh","fvMesh"} else p.is_file()),"Use only ordinary reviewed input/data roles.")

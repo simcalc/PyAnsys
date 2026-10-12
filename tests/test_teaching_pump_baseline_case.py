@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -204,6 +205,78 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),mock.patch.object(case,'validate_runtime'):
                 result=case.validate_source(source);self.assertEqual([r['cellCount'] for r in result['components']],[6,6]);self.assertEqual(len(result['snapshots']),12)
                 self.assertTrue(result['mergedNativeMeshEvidence']['coupledInterfaceCoverageVerified'])
+
+    def test_transaction_reuses_same_current_path_proof_and_returns_independent_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source,geometry_module=self.fixture(root)
+            with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),\
+                 mock.patch.object(case,'validate_runtime') as runtime,\
+                 mock.patch.object(case,'_validate_source',wraps=case._validate_source) as replay,\
+                 mock.patch.object(native_case,'validate_inputs',wraps=native_case.validate_inputs) as geometry_replay:
+                with case.SourceProofTransaction(source):
+                    first=case.validate_source(source);first['components'][0]['cellCount']=999
+                    second=case.validate_source(source)
+                    self.assertEqual(second['components'][0]['cellCount'],6)
+                    self.assertEqual(replay.call_count,1);self.assertEqual(geometry_replay.call_count,1)
+                    self.assertEqual(runtime.call_count,2)
+                case.validate_source(source)
+                self.assertEqual(replay.call_count,2);self.assertIsNone(case._SOURCE_TRANSACTION.get())
+
+    def test_transaction_rejects_changed_deleted_or_added_source_bytes_without_replay(self):
+        for change in ('changed','deleted','added','renamed','empty-directory'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);source,geometry_module=self.fixture(root)
+                with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),\
+                     mock.patch.object(case,'validate_runtime'),mock.patch.object(case,'_validate_source',wraps=case._validate_source) as replay:
+                    with case.SourceProofTransaction(source):
+                        case.validate_source(source);target=source/'logs/00-gmshToFoam.log'
+                        if change=='changed':target.write_bytes(target.read_bytes()+b'CHANGED')
+                        elif change=='deleted':target.unlink()
+                        elif change=='added':(source/'unexpected-data').write_bytes(b'ADDED')
+                        elif change=='renamed':target.rename(source/'logs/renamed-log')
+                        else:(source/'added-empty-directory').mkdir()
+                        with self.assertRaisesRegex(case.BaselineCaseIssue,'inventory changed'):case.validate_source(source)
+                        self.assertEqual(replay.call_count,1)
+
+    def test_transaction_never_promotes_another_path_or_leaks_after_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source,geometry_module=self.fixture(root);copy=root/'copied-source';shutil.copytree(source,copy)
+            with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),\
+                 mock.patch.object(case,'validate_runtime'),mock.patch.object(case,'_validate_source',wraps=case._validate_source) as replay:
+                with case.SourceProofTransaction(source,copy):
+                    case.validate_source(source);case.validate_source(copy)
+                    self.assertEqual(replay.call_count,2)
+                    with self.assertRaisesRegex(case.BaselineCaseIssue,'different/unadmitted'):case.validate_source(root/'another-path')
+                self.assertIsNone(case._SOURCE_TRANSACTION.get())
+
+    def test_transaction_rechecks_real_external_runtime_bytes_on_every_reuse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source,geometry_module=self.fixture(root);installed=root/'synthetic-installed-binaries';installed.mkdir()
+            for name in producer.PROGRAMS:(installed/name).write_bytes(b'native')
+            original_read=case.base.read_regular
+            def installed_read(path,limit):
+                # Explicit synthetic external package storage; production SHA,
+                # schema and exact /opt identity validator itself is unchanged.
+                return original_read(installed/Path(path).name if Path(path).as_posix().startswith('/opt/openfoam12/') else path,limit)
+            with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),\
+                 mock.patch.object(case.base,'read_regular',side_effect=installed_read):
+                with case.SourceProofTransaction(source):
+                    case.validate_source(source);(installed/'checkMesh').write_bytes(b'CHANGED')
+                    with self.assertRaisesRegex(case.BaselineCaseIssue,'Installed native source binary bytes changed'):case.validate_source(source)
+
+    def test_transaction_detects_mutation_between_boundary_hashes_and_resets_on_deadline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source,geometry_module=self.fixture(root)
+            with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),mock.patch.object(case,'validate_runtime'):
+                with case.SourceProofTransaction(source):
+                    case.validate_source(source)
+                    def mutate(_):(source/'logs/00-gmshToFoam.log').write_bytes(b'MUTATED DURING REUSE')
+                    with mock.patch.object(case,'validate_runtime',side_effect=mutate),self.assertRaisesRegex(case.BaselineCaseIssue,'during the transaction boundary'):
+                        case.validate_source(source)
+                with self.assertRaises(case.BaselineDeadlineIssue):
+                    with case.SourceProofTransaction(source,deadline=case.time.monotonic()+10):
+                        with mock.patch.object(case.time,'monotonic',return_value=float('inf')):case.validate_source(source)
+                self.assertIsNone(case._SOURCE_TRANSACTION.get())
 
     def test_prepare_and_replay_preserve_source_and_author_fresh_uniform_physics(self):
         with tempfile.TemporaryDirectory() as temp:

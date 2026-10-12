@@ -5,6 +5,8 @@ preparer launches no process and inherits no flow, head or baseline result.
 """
 from __future__ import annotations
 import argparse
+from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -13,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sys
+import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import teaching_pump_native_case as geometry_case
@@ -67,6 +70,65 @@ encoded,record,json_file = geometry_case.encoded,geometry_case.record,geometry_c
 class BaselineCaseIssue(ValueError):pass
 
 
+class BaselineDeadlineIssue(BaselineCaseIssue):pass
+
+
+_SOURCE_TRANSACTION = ContextVar("teaching_baseline_source_transaction", default=None)
+
+
+class SourceProofTransaction:
+    """Reuse a full proof only for unchanged bytes at one admitted source path.
+
+    The value exists only inside this explicit context. Each path needs its own
+    initial full replay; copied bytes never inherit another path's cached proof.
+    Every boundary hashes the complete ordinary-file inventory and rechecks the
+    installed runtime, including binaries outside the evidence directory.
+    """
+    def __init__(self, *source_paths, deadline=None):
+        require(0 < len(source_paths) <= 2, "Declare the exact original/copied source paths for this transaction.")
+        self._roots = {safety.scope_path(path).resolve() for path in source_paths}
+        require(len(self._roots) == len(source_paths), "Source transaction paths must be distinct.")
+        require(deadline is None or type(deadline) in (int,float) and math.isfinite(deadline), "Use one finite monotonic transaction deadline.")
+        self._deadline, self._proofs, self._token = deadline, {}, None
+
+    def check_deadline(self):
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise BaselineDeadlineIssue("The baseline deadline expired during source evidence verification.")
+
+    def __enter__(self):
+        require(self._token is None and _SOURCE_TRANSACTION.get() is None, "A source proof transaction must be fresh and cannot nest.")
+        self.check_deadline(); self._token = _SOURCE_TRANSACTION.set(self)
+        return self
+
+    def __exit__(self, *_):
+        _SOURCE_TRANSACTION.reset(self._token); self._token = None; self._proofs.clear()
+
+    def inventory(self, root):
+        files=source_inventory(root);directories=[];count=0
+        for path in sorted(root.rglob("*")):
+            count+=1
+            require(count<=2048 and len(path.relative_to(root).parts)<=8, "Bound every source directory and file at the transaction boundary.")
+            if path.is_dir():directories.append(path.relative_to(root).as_posix())
+        return files,tuple(directories)
+
+    def verify(self, root):
+        require(self._token is not None and root.resolve() in self._roots, "Never reuse a source proof at a different/unadmitted source path.")
+        self.check_deadline(); before = self.inventory(root); self.check_deadline()
+        cached = self._proofs.get(root.resolve())
+        if cached is None:
+            proof = _validate_source(root)
+            require(proof["sourceFileRecords"] == before[0], "Source bytes changed while constructing their full proof.")
+        else:
+            require(before == cached["inventory"], "Source inventory changed after its transaction proof; no stale proof may be reused.")
+            identity, _ = json_file(root, geometry_runner.RUNTIME)
+            validate_runtime(identity)
+            proof = cached["proof"]
+        self.check_deadline(); after = self.inventory(root); self.check_deadline()
+        require(after == before, "Source bytes changed during the transaction boundary check.")
+        if cached is None: self._proofs[root.resolve()] = {"proof":deepcopy(proof),"inventory":deepcopy(before)}
+        return deepcopy(proof)
+
+
 def require(condition,action):
     if not condition:raise BaselineCaseIssue(action)
 
@@ -101,8 +163,23 @@ def validate_runtime(identity):
 
 
 def validate_source(directory):
-    root=safety.scope_path(directory);prepared=geometry_case.verify_output(root)
-    authored=geometry_case.validate_inputs(root/"source-geometry");execution,execution_row=json_file(root,geometry_runner.REPORT)
+    root=safety.scope_path(directory)
+    transaction=_SOURCE_TRANSACTION.get()
+    return transaction.verify(root) if transaction is not None else _validate_source(root)
+
+
+def _validate_source(root):
+    prepared=geometry_case.verify_output(root)
+    # verify_output already replays validate_inputs and binds this exact report
+    # and independently derived interface proof. Read its current metadata once
+    # instead of reconstructing the same MSH/centroid/incidence proof again.
+    authored_report,authored_row=json_file(root/"source-geometry", "teaching-geometry.json")
+    require(authored_row["sha256"]==prepared["report"]["sourceGeometryReportSha256"], "The already replayed authored source report changed.")
+    authored={"report":authored_report,"reportFile":authored_row,"components":deepcopy(prepared["components"]),
+        "sourceFileRecords":[{**row,"path":row["path"].removeprefix("source-geometry/")}
+            for row in prepared["report"]["sourceFileRecords"]],
+        "commonInterfaceEvidence":deepcopy(prepared["report"]["commonInterfaceEvidence"])}
+    execution,execution_row=json_file(root,geometry_runner.REPORT)
     runtime,runtime_row=json_file(root,geometry_runner.RUNTIME);validate_runtime(runtime)
     required_true=("commandExecutionPerformedByThisTool","nativeGeometryAccepted","nativeGeometryQualityVerified","openFoamConversionVerified",
         "physicalWallTypesVerified","coupledInterfaceCoverageVerified","inputArtifactsImmutable","sourceGeometryImmutable")

@@ -905,6 +905,30 @@ Contract tests and this candidate definition do not qualify convergence,
 noncavitating H0, NPSHr, transient performance or physical accuracy. The actual
 fresh native run decides those prerequisite numerical results.
 
+The actual uniform-outlet trial
+[38197674270](https://github.com/simcalc/PyAnsys/actions/runs/38197674270)
+passed 966 contract tests and repeated the native geometry/interface gates.
+The native solver reached iteration 500 and `End`, with 999 seconds reported
+wall time. The Python evidence checks then reached the outer 1260-second
+deadline (exit code 124); execution and acceptance JSON files were not written.
+All three complete raw data archives were retained and independently checked.
+The raw final 481--500 iterations still have pressure initial residual up to
+0.0111081, head span 108.63%, and minimum static absolute pressure about
+-2.574 MPa. All 388 outlet face vectors equal the prescribed normal profile,
+but an adjacent stator cell still reaches about 332.15 m/s. These are rejected
+numerical facts, not qualified pump performance. Fixing evidence-check cost
+alone does not repair these physical/numerical prerequisites or qualify H0.
+
+The evidence correction uses one complete source replay per original/copied
+path within one explicit transaction. Every reuse rehashes the entire file and
+directory inventory and verifies the installed external native binaries; no
+proof is shared across paths or retained after the transaction. The runner
+checks its deadline around heavy evidence work and interrupts that work before
+the outer watchdog, retaining a truthful rejection report. The 1200-second,
+one-CPU, 4-GiB, 1-GiB limits and numerical acceptance thresholds are unchanged.
+The combined source/runner/phase/import/sliding/reduction regression has 120
+passing tests. Those contract results do not qualify the rejected CFD fields.
+
 ### Conditional active cavitation reference
 
 The manual `Authored classroom pump active cavitation reference` workflow
@@ -912,6 +936,15 @@ repeats fresh authored CAD, native mesh/interface checks and the numerically
 accepted single-phase SST/MRF prerequisite in the same run. Only that accepted
 case supplies its immutable mesh and provenance to a new liquid-initialized
 Schnerr-Sauer calculation. It copies no solution fields or single-phase H0.
+
+Native `checkMesh` writes `0/cellToRegion` for the two topologically separate
+regions joined by NCC. This file is a generated label diagnostic, not an
+authored initial flow field. The phase and rotor readers check every label,
+owner/neighbour connectivity, exactly two complete fluid cell zones, the
+generating log and current raw hashes. The accepted-reference archive reader
+replays that same proof before extraction. Extra initial fields and unbound
+diagnostics remain prohibited; reading this diagnostic supplies no flow or
+inherited numerical acceptance.
 
 This separate reference uses 300000 Pa absolute inlet total pressure, the same
 water and flow/RPM assumptions, and fixed MRF. Native `p_rgh` and `p` are in Pa;

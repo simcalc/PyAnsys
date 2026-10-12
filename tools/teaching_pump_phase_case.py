@@ -7,6 +7,7 @@ case. No native command, pressure sweep, result or inherited phase H0 is made.
 from __future__ import annotations
 
 import argparse
+from array import array
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -23,6 +24,7 @@ import frozen_rotor_research_protocol as protocol
 import teaching_pump_baseline_case as baseline_case
 import reduce_teaching_pump_baseline as baseline
 import teaching_pump_outlet_profile as outlet
+import frozen_rotor_native_quality as native_quality
 
 SCHEMA = "untirta.teaching-pump-phase-reference-preparation.v1"
 REPORT = "teaching-phase-preparation.json"
@@ -37,6 +39,8 @@ MAX_WORKSPACE_BYTES = 1024**3
 MAX_NATIVE_CACHE_BYTES = 8 * 1024**2
 NATIVE_CACHE_PATH = "case/constant/fvMesh/polyFaces"
 NATIVE_CACHE_SOURCE = "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/fvMesh/fvMesh.C"
+NATIVE_REGION_PATH = "case/0/cellToRegion"
+NATIVE_REGION_SOURCE = "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/meshCheck/checkTopology.C"
 STARTUP_FIELDS = {"totalPressurePa": {"dimensions": "1 -1 -2 0 0 0 0", "function": "totalPressurePa", "type": "pressure", "field": "p"},
     "U2": {"dimensions": "0 2 -2 0 0 0 0", "function": "absoluteVelocitySquared", "type": "magSqr", "field": "U"},
     "yPlus": {"dimensions": "0 0 0 0 0 0 0", "function": "wallYPlus", "type": "yPlus", "field": None}}
@@ -289,6 +293,8 @@ All actual labels must belong to this NCC patch's originalPatch face range.
     require(type(after_native_execution) is bool, "Declare the native data verification stage explicitly.")
     directory = Path(root) / "case/constant/fvMesh"
     rows, evidence = native_startup_fields(root, after_native_execution=after_native_execution)
+    region_rows, region_evidence = native_region_data(root, after_native_execution=after_native_execution)
+    rows += region_rows; evidence += region_evidence
     if not directory.exists():
         require(not directory.is_symlink(), "Native cache paths cannot be links.")
         return rows, evidence
@@ -297,6 +303,104 @@ All actual labels must belong to this NCC patch's originalPatch face range.
     require({path.name for path in directory.iterdir()} == {"polyFaces"}, "Only the exact native polyFaces data cache is supported.")
     raw, row = read(root, NATIVE_CACHE_PATH, limit=MAX_NATIVE_CACHE_BYTES)
     return [row, *rows], [native_polyfaces(raw, Path(root) / "case/constant/polyMesh"), *evidence]
+
+
+def native_cell_to_region(raw, owner_raw, neighbour_raw, zones_raw, check_mesh_log_raw):
+    """Verify the explicit NO_READ checkMesh label diagnostic, never flow state.
+
+Pinned meshCheck/checkTopology.C316--347 writes regionSplit at native time0.
+Region labels are checked against current face adjacency and actual cell zones;
+neither component offsets nor region-number/zone-name equivalence is assumed.
+"""
+    def labels(data, name, maximum_count, maximum_value, *, location=None):
+        require(isinstance(data, bytes) and 0 < len(data) <= MAX_FILE_BYTES, "Bound every native region/addressing byte payload.")
+        text = re.sub(r"/\*.*?\*/|//[^\n]*", "", data.decode("ascii"), flags=re.S)
+        body = native_quality.native_body(data, name, {"labelList"})
+        header = re.match(r"\s*FoamFile\s*\{([^{}]*)\}", text)
+        require(header and all(len(re.findall(r"\b" + key + r"\s+[^;{}]+;", header[1])) == 1
+            for key in ("class", "object", "format")), "Native diagnostic/addressing headers need unique actual data roles.")
+        if location is not None:
+            pairs = re.findall(r'([A-Za-z][A-Za-z0-9_]*)\s+("[^"\n]*"|[^;{}]+);', header[1])
+            keys = [key for key, _ in pairs]
+            require(len(keys) == len(set(keys)) and set(keys) in ({"format", "class", "location", "object"},
+                {"version", "format", "class", "location", "object"})
+                and not re.sub(r'[A-Za-z][A-Za-z0-9_]*\s+("[^"\n]*"|[^;{}]+);', "", header[1]).strip(),
+                "The native region diagnostic header permits only its exact plain storage roles.")
+            locations = re.findall(r"\blocation\s+([^;{}]+);", header[1])
+            require(len(locations) == 1 and locations[0].strip().strip('"') == location,
+                "The native cellToRegion header must identify its exact initial diagnostic time0.")
+        match = re.fullmatch(r"(\d+)\s*(?:\(([^()]*)\)|\{([^{}]*)\})\s*;?", body, re.S)
+        require(match and int(match[1]) <= maximum_count, "A complete bounded counted native labelList is required.")
+        count = int(match[1]); uniform = match[3] is not None; words = (match[3] if uniform else match[2]).split()
+        require((count > 0 and len(words) == 1 if uniform else len(words) == count)
+            and all(re.fullmatch(r"\d+", word) and int(word) < maximum_value for word in words),
+            "Every native diagnostic/addressing label must be an exact bounded nonnegative integer.")
+        result = array("I", map(int, words)); return result * count if uniform else result
+    regions = labels(raw, "cellToRegion", 500000, 2, location="0")
+    owners = labels(owner_raw, "owner", 2000000, 500000)
+    neighbours = labels(neighbour_raw, "neighbour", 2000000, 500000)
+    require(0 <= len(neighbours) < len(owners) and owners, "Retain actual complete internal and boundary face addressing.")
+    cells = max(max(owners), max(neighbours, default=-1)) + 1
+    require(0 < cells <= 500000 and len(regions) == cells and set(regions) == {0, 1}
+        and set(owners) | set(neighbours) == set(range(cells))
+        and all(owners[i] < neighbours[i] for i in range(len(neighbours))),
+        "Every actual cell needs one of exactly two native region labels and its complete ordered face addressing.")
+    zones = native_quality.zones(zones_raw, cells)
+    parents = array("I", range(cells))
+    def find(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]; index = parents[index]
+        return index
+    for owner, neighbour in zip(owners, neighbours):
+        require(regions[owner] == regions[neighbour], "A native internal face cannot cross reported disconnected regions.")
+        left, right = find(owner), find(neighbour)
+        if left != right: parents[max(left, right)] = min(left, right)
+    require(len({find(i) for i in range(cells)}) == 2,
+        "Actual owner/neighbour adjacency must contain exactly two connected regions, without hidden isolated cells.")
+    groups = {region: {i for i, label in enumerate(regions) if label == region} for region in (0, 1)}
+    mapping = {}
+    for region, ids in groups.items():
+        names = [name for name, zone in zones.items() if zone == ids]
+        require(len(names) == 1, "Each connected region must equal one complete actual native fluid cell zone.")
+        mapping[str(region)] = {"cellZone": names[0], "cellCount": len(ids)}
+    require(isinstance(check_mesh_log_raw, bytes) and 0 < len(check_mesh_log_raw) <= LIMITS["maximumNativeLogBytes"],
+        "Retain the actual bounded generating checkMesh log.")
+    log = check_mesh_log_raw.decode("utf-8")
+    require(not re.search(r"FOAM FATAL|Segmentation fault|Floating point exception", log), "A fatal native log cannot supply a completed region diagnostic.")
+    require(re.findall(r"(?m)^\s*cells:\s*(\d+)\s*$", log) == [str(cells)]
+        and re.findall(r"(?m)^\s*\*Number of regions:\s*(\d+)\s*$", log) == ["2"]
+        and re.findall(r'<<Writing region information to\s+"([^"\n]+)"', log) == ["0/cellToRegion"]
+        and re.search(r"(?m)^End\s*$", log), "Bind the complete native diagnostic count, two regions, explicit writer path and End to the actual log.")
+    written = re.findall(r"<<Writing region ([01]) \(fully disconnected\) with (\d+) cells to cellSet region([01])", log)
+    require(len(written) == 2 and {a for a, _, _ in written} == {"0", "1"}
+        and all(a == b and int(count) == mapping[a]["cellCount"] for a, count, b in written),
+        "Both actual native region-set counts must agree with current labels, topology and zones.")
+    return {"nativeRole": "checkMesh-cellToRegion-labelList", "dataOnlyVerified": True, "authoredInput": False,
+        "initialSolverState": False, "nativeReadPolicy": "NO_READ/NO_WRITE; checkMesh explicitly writes this diagnostic",
+        "allNativeCellLabelsChecked": cells, "connectedRegionCount": 2, "regionToCellZone": mapping,
+        "actualInternalFaceCount": len(neighbours), "actualFaceCount": len(owners),
+        "regionLabelsBoundToFaceConnectivity": True, "regionLabelsBoundToActualCellZones": True,
+        "componentOffsetsAssumed": False, "flowCalculated": False, "numericalAcceptanceInherited": False,
+        "coordinateUnitsValidatedByThisDiagnostic": False, "sourceUrl": NATIVE_REGION_SOURCE}
+
+
+def native_region_data(root, *, after_native_execution=False):
+    require(type(after_native_execution) is bool, "Declare the native region diagnostic stage explicitly.")
+    path = Path(root) / NATIVE_REGION_PATH; log_path = Path(root) / "logs/00-checkMesh.log"
+    present = path.exists() or path.is_symlink()
+    log = log_row = None
+    if log_path.exists() or log_path.is_symlink(): log, log_row = read(root, "logs/00-checkMesh.log", limit=LIMITS["maximumNativeLogBytes"])
+    expected = log is not None and (b"cellToRegion" in log or re.search(rb"\*Number of regions:\s*2\s*$", log, re.M))
+    if not present and not expected: return [], []
+    require(after_native_execution and present and log is not None,
+        "Retain the complete native-generated cellToRegion diagnostic and generating log only after actual execution; never prefill it.")
+    raw, row = read(root, NATIVE_REGION_PATH)
+    mesh = [read(root, "case/constant/polyMesh/" + name) for name in ("owner", "neighbour", "cellZones")]
+    proof = native_cell_to_region(raw, *(item[0] for item in mesh), log)
+    proof.update(path=NATIVE_REGION_PATH, sourceCheckMeshLog=log_row, sourceMeshFileRecords=[item[1] for item in mesh])
+    require(read(root, NATIVE_REGION_PATH)[1] == row and read(root, log_row["path"], limit=LIMITS["maximumNativeLogBytes"])[1] == log_row
+        and all(read(root, item[1]["path"])[1] == item[1] for item in mesh), "Current native region diagnostic, log or mesh bytes changed during inspection.")
+    return [row], [proof]
 
 
 def native_startup_fields(root, *, after_native_execution=False):
@@ -483,7 +587,9 @@ remain separate. No extra constant/system recipe can alter this authored model.
     for folder in ("0", "system", "constant"):
         actual = base.regular_directory(case / folder)
         expected = {Path(path).name for path in authored if path.startswith(folder + "/")}
-        if folder == "0" and after_native_execution: expected |= {name for name in STARTUP_FIELDS if (actual / name).exists()}
+        if folder == "0" and after_native_execution:
+            expected |= {name for name in STARTUP_FIELDS if (actual / name).exists()}
+            if (actual / "cellToRegion").exists(): expected.add("cellToRegion")
         if folder == "constant":
             expected.add("polyMesh")
             if after_native_execution and (case / "constant/fvMesh").exists(): expected.add("fvMesh")

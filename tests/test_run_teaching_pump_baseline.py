@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 import run_teaching_pump_baseline as runner
+import teaching_pump_baseline_case as preparation_api
 
 
 def near_points_fixture(root,*,case="impeller-case",log="logs/02-checkMesh.log",source="source-teaching/source-geometry/teaching-geometry.json"):
@@ -107,6 +108,19 @@ class TeachingProcessTests(unittest.TestCase):
     def test_log_limit_and_postcompletion_deadline_stop_owned_child(self):
         with tempfile.TemporaryDirectory() as temp,patch.dict(runner.LIMITS,{"maximumLogBytes":5}),self.assertRaises(ValueError):self.fixture(Path(temp))
         with tempfile.TemporaryDirectory() as temp,self.assertRaisesRegex(ValueError,"process completion"):self.fixture(Path(temp),times=[0,0,0,0,1001])
+
+    def test_evidence_alarm_is_bounded_and_restores_prior_handler_and_timer(self):
+        previous_handler=lambda *_:None
+        with patch.object(runner.signal,'SIGALRM',14,create=True),patch.object(runner.signal,'ITIMER_REAL',0,create=True),\
+             patch.object(runner.signal,'getitimer',return_value=(5.,.75),create=True),\
+             patch.object(runner.signal,'getsignal',return_value=previous_handler),\
+             patch.object(runner.signal,'signal') as handlers,patch.object(runner.signal,'setitimer',create=True) as timers,\
+             patch.object(runner.time,'monotonic',side_effect=[100.,100.,101.]):
+            with runner.EvidenceDeadline(110.):
+                callback=handlers.call_args.args[1]
+                with self.assertRaises(runner.EvidenceDeadlineIssue):callback(14,None)
+            self.assertEqual(timers.call_args_list,[unittest.mock.call(0,5.),unittest.mock.call(0,0),unittest.mock.call(0,4.,.75)])
+            self.assertIs(handlers.call_args.args[1],previous_handler)
 
     def test_mismatched_command_index_and_binary_sha_reject_before_start(self):
         with tempfile.TemporaryDirectory() as temp,patch.object(runner.subprocess,"Popen") as popen:
@@ -277,12 +291,13 @@ class TeachingEndpointTests(unittest.TestCase):
 
 
 class SyntheticTeachingCampaignTests(unittest.TestCase):
-    def campaign(self,root,*,failed_stage=None,missing_fields=False,mutate=None,bad_mesh=False,bad_log=False):
+    def campaign(self,root,*,failed_stage=None,missing_fields=False,mutate=None,bad_mesh=False,bad_log=False,expire_at=None,alarm_failure=False):
         """Every native/scientific reader is mocked; no CAD/mesh/flow executes."""
         source=root/"source";source.mkdir();output=root/"execution";components=[
             {"component":name,"cellCount":2,"nodeCount":5,"cellZone":zone,"patchFaces":{name+"-fixture":1}}
             for name,zone in zip(("impeller","volute"),("rotating-fluid","stationary-fluid"))]
         (source/"source-proof").write_bytes(b"SYNTHETIC-INPUT")
+        clock={'value':100.}
         def prepare(*_):
             output.mkdir();authored=[];copies=[]
             for name in ("impeller-case/system/controlDict","impeller-case/0/p","source-teaching/source-proof"):
@@ -292,14 +307,18 @@ class SyntheticTeachingCampaignTests(unittest.TestCase):
                 "authoredInputFiles":authored,"sourceComponentFiles":copies,"sourceEvidenceFileRecords":copies,"components":components,"authoredPhysicsFileRecords":[],
                 **{key:"0"*64 for key in ("sourceGeometryExecutionReportSha256","sourceGeometryPreparationReportSha256","sourceGeometryInputManifestSha256","sourceAuthoredGeometryReportSha256","sourceGeometryIdentitySha256")}}
             (output/"teaching-baseline-preparation.json").write_text(json.dumps(report));return report
-        def verify(*_,**kwargs):return {"report":json.loads((output/"teaching-baseline-preparation.json").read_bytes()),"reportFile":runner.record(output,"teaching-baseline-preparation.json")[1],"components":components}
-        preparer=SimpleNamespace(prepare=prepare,verify_output=verify,validate_source=lambda _: {"sourceFileRecords":[runner.record(source,"source-proof")[1]]})
+        def verify(*_,**kwargs):
+            if expire_at=='final-source' and kwargs.get('after_native_ncc'):clock['value']=1301.
+            return {"report":json.loads((output/"teaching-baseline-preparation.json").read_bytes()),"reportFile":runner.record(output,"teaching-baseline-preparation.json")[1],"components":components}
+        preparer=SimpleNamespace(prepare=prepare,verify_output=verify,validate_source=lambda _: {"sourceFileRecords":[runner.record(source,"source-proof")[1]]},
+            SourceProofTransaction=preparation_api.SourceProofTransaction)
         def runtime(*_):
             (output/runner.RUNTIME).write_text('{"syntheticFixture":true}');return {"syntheticFixture":True}
         def manifest(*_):
             rows={}
             for name in (runner.IDENTITY,runner.MANIFEST,runner.STUDY):
                 (output/name).write_text('{"syntheticFixture":true}');rows[name]=runner.record(output,name)[1]
+            if expire_at=='manifest':clock['value']=1301.
             return rows,[{**runner.record(output,"impeller-case/0/p")[1],"control":"boundaryPhysics"}]
         def execute(arguments,workspace,deadline,identity,index):
             text="Build : 12-86e126a7bc4d\n"+("FOAM FATAL ERROR\n" if bad_log and index==1 else "")+"End\n"
@@ -317,6 +336,8 @@ class SyntheticTeachingCampaignTests(unittest.TestCase):
             if missing_fields:raise ValueError("Actual endpoint fields missing")
             folder=output/"impeller-case/500";folder.mkdir();(folder/"p").write_bytes(b"SYNTHETIC-FIELD")
             row=runner.record(output,"impeller-case/500/p")[1]
+            if expire_at=='endpoint':clock['value']=1301.
+            if alarm_failure:raise runner.EvidenceDeadlineIssue('Synthetic owned evidence alarm; no native completion acceptance')
             return [{"name":"p",**{k:row[k] for k in ("bytes","sha256")}}],[row],[{"syntheticFixture":True}]
         def samples(*_):
             folder=output/"impeller-case/postProcessing/fixture/0";folder.mkdir(parents=True);(folder/"volFieldValue.dat").write_bytes(b"# SYNTHETIC\n500 1\n")
@@ -328,7 +349,8 @@ class SyntheticTeachingCampaignTests(unittest.TestCase):
              patch.object(runner.base,"verify_merged_mesh",side_effect=ValueError("Actual mesh failed") if bad_mesh else None,return_value={"mergedCellCount":4,"mergedPointCount":10}),\
              patch.object(runner.scientific,"parse_mesh_quality",return_value={"syntheticFixture":True}),\
              patch.object(runner.scientific,"parse_solver_log",return_value={500:{"syntheticFixture":True}}),\
-             patch.object(runner,"final_fields",side_effect=fields),patch.object(runner,"sampling_records",side_effect=samples),redirect_stdout(io.StringIO()):
+             patch.object(runner,"final_fields",side_effect=fields),patch.object(runner,"sampling_records",side_effect=samples),\
+             patch.object(runner.time,'monotonic',side_effect=lambda:clock['value']),redirect_stdout(io.StringIO()):
             code=runner.run(source,output)
         return code,json.loads((output/runner.REPORT).read_bytes()),output
 
@@ -367,6 +389,25 @@ class SyntheticTeachingCampaignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:code,report,_=self.campaign(Path(temp),missing_fields=True)
         self.assertEqual(code,2);self.assertTrue(report["nativeSolverCompleted"])
         self.assertFalse(report["finiteNativeFieldsVerified"]);self.assertFalse(report["actualCfdRunVerified"])
+
+    def test_deadline_before_solver_or_after_fields_persists_truthful_rejection(self):
+        for stage in ('manifest','endpoint','final-source'):
+            with self.subTest(stage=stage),tempfile.TemporaryDirectory() as temp:
+                code,report,output=self.campaign(Path(temp),expire_at=stage)
+                self.assertEqual(code,2);self.assertTrue((output/runner.REPORT).is_file())
+                self.assertFalse(report['actualCfdRunVerified']);self.assertFalse(report['inputArtifactsImmutable'])
+                self.assertFalse(report['numericalBaselineQualified']);self.assertGreaterEqual(report['elapsedSeconds'],1200)
+                self.assertEqual(len(report['retainedNativeLogRecords']),3 if stage=='manifest' else 4)
+                if stage in ('manifest','endpoint'):self.assertFalse(report['simulationExecuted'])
+                if stage=='endpoint':self.assertTrue(report['nativeSolverCompleted']);self.assertFalse(report['finiteNativeFieldsVerified'])
+
+    def test_alarm_interruption_during_evidence_keeps_logs_without_false_scan_or_execution_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:code,report,_=self.campaign(Path(temp),alarm_failure=True)
+        self.assertEqual(code,2);self.assertEqual(report['diagnostic']['type'],'EvidenceDeadlineIssue')
+        self.assertEqual(report['diagnostic']['program'],'native-endpoint-fields')
+        self.assertTrue(report['nativeSolverCompleted']);self.assertFalse(report['finiteNativeFieldsVerified'])
+        self.assertFalse(report['simulationExecuted']);self.assertFalse(report['actualCfdRunVerified'])
+        self.assertEqual(len(report['retainedNativeLogRecords']),4)
 
     def test_actual_source_identity_inputs_or_prior_log_cannot_mutate(self):
         for relative in ("impeller-case/0/p","impeller-case/system/controlDict","source-teaching/source-proof",runner.IDENTITY,"logs/00-mergeMeshes.log","original-source",

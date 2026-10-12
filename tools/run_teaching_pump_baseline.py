@@ -12,10 +12,12 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import shutil
 import subprocess
 import sys
 import time
+import threading
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import run_teaching_pump_geometry as geometry
@@ -33,6 +35,48 @@ IDENTITY="teaching-geometry-identity.json"
 PROGRAMS=("mergeMeshes","createNonConformalCouples","checkMesh","foamRun")
 LIMITS={"maximumSeconds":1200,"cpus":1,"maximumMemoryBytes":4*1024**3,"maximumWorkspaceBytes":1024**3,
     "maximumFileBytes":128*1024**2,"maximumLogBytes":4*1024**2,"maximumReportBytes":128*1024,"maximumPaths":2048,"maximumPathDepth":8}
+
+
+class EvidenceDeadlineIssue(TimeoutError):pass
+
+
+def check_deadline(deadline, stage):
+    if time.monotonic() >= deadline:
+        raise EvidenceDeadlineIssue("The1200s baseline evidence deadline expired before/after " + stage + ".")
+
+
+class EvidenceDeadline:
+    """Interrupt owned Python evidence work, preserving any inherited timer.
+
+    The native executor already stops only its own child in its finally block.
+    After interruption the runner retains its actual logs and writes a truthful
+    rejection report; this alarm never extends the1200s computation budget.
+    """
+    def __init__(self, deadline):
+        self.deadline, self._saved, self._started = deadline, None, None
+
+    def __enter__(self):
+        check_deadline(self.deadline, "evidence work")
+        if hasattr(signal,"setitimer") and threading.current_thread() is threading.main_thread():
+            self._started=time.monotonic()
+            previous=signal.getitimer(signal.ITIMER_REAL)
+            self._saved=(signal.getsignal(signal.SIGALRM),previous)
+            remaining=self.deadline-self._started
+            if previous[0]>0:remaining=min(remaining,previous[0])
+            def expired(*_):
+                raise EvidenceDeadlineIssue("The baseline evidence alarm or earlier inherited process timer expired.")
+            signal.signal(signal.SIGALRM,expired)
+            signal.setitimer(signal.ITIMER_REAL,max(remaining,1e-6))
+        return self
+
+    def __exit__(self,*_):
+        if self._saved is not None:
+            previous_handler,previous=self._saved
+            signal.setitimer(signal.ITIMER_REAL,0)
+            signal.signal(signal.SIGALRM,previous_handler)
+            remaining=max(previous[0]-(time.monotonic()-self._started),1e-6) if previous[0]>0 else 0
+            signal.setitimer(signal.ITIMER_REAL,remaining,previous[1])
+            self._saved=None
 
 
 def require(condition,action):
@@ -295,6 +339,12 @@ def run(geometry_native_directory,output_directory):
     started=time.monotonic();deadline=started+LIMITS["maximumSeconds"];safety.context_guard()
     source=safety.scope_path(geometry_native_directory);output=safety.scope_path(output_directory,fresh=True)
     import teaching_pump_baseline_case as preparation
+    with preparation.SourceProofTransaction(source,output/"source-teaching",deadline=deadline):
+        return _run(source,output,started,deadline,preparation)
+
+
+def _run(source,output,started,deadline,preparation):
+    check_deadline(deadline,"source preparation")
     prepared=preparation.prepare(source,output);verified=preparation.verify_output(output);output=base.regular_directory(output)
     require(prepared==verified["report"] and prepared["schemaVersion"]==PREPARATION_SCHEMA and prepared["nativeCommandArguments"]==commands(output),
         "Require the exact reviewed four-stage new authored teaching preparation.")
@@ -309,7 +359,9 @@ def run(geometry_native_directory,output_directory):
         "npsh3Qualified":False,"physicalTransientExecuted":False,"restartVerified":False,"manufacturerGeometryVerified":False,"mainApplicationWrites":False,
         "claimBoundary":"Actual steady SST/MRF execution on a new authored SI classroom pump. Numerical acceptance is independent and pending; manufacturer performance, wall resolution, mesh/time convergence, NPSH3 and physical transient remain unverified."}
     (output/"logs").mkdir();current="runtime-identity";bound_rows={};bound_inputs=[]
+    alarm=EvidenceDeadline(deadline)
     try:
+        alarm.__enter__();check_deadline(deadline,"prepared source proof")
         runtime=runtime_identity(output,deadline)
         immutable={"teaching-baseline-preparation.json":verified["reportFile"],RUNTIME:record(output,RUNTIME,LIMITS["maximumReportBytes"])[1]}
         report["runtimeIdentitySha256"]=immutable[RUNTIME]["sha256"]
@@ -321,7 +373,9 @@ def run(geometry_native_directory,output_directory):
         for index,args in enumerate(commands(output)):
             current=args[0]
             if current=="foamRun":
+                check_deadline(deadline,"current source manifest")
                 bound_rows,bound_inputs=bind_manifest(output)
+                check_deadline(deadline,"current source manifest")
                 report.update(inputManifestSha256=bound_rows[MANIFEST]["sha256"],studySha256=bound_rows[STUDY]["sha256"],geometryIdentitySha256=bound_rows[IDENTITY]["sha256"])
             stage,text=execute(args,output,deadline,runtime,index);report["stages"].append(stage)
             require(stage["exitCode"]==0,"An actual native baseline utility returned exit "+str(stage["exitCode"]));geometry.native_geometry.completed_log(text)
@@ -339,12 +393,17 @@ def run(geometry_native_directory,output_directory):
             elif current=="foamRun":
                 history=scientific.parse_solver_log(text);require(max(history)==500,"Actual steady native output must reach the500 authored outer iterations.")
                 report["nativeSolverCompleted"]=True;workspace_size(output)
+                current="native-endpoint-fields";check_deadline(deadline,current)
                 primary,fields,scans=final_fields(output,sum(row["cellCount"] for row in verified["components"]))
+                check_deadline(deadline,current)
+                current="native-sampling-evidence";check_deadline(deadline,current)
                 samples=sampling_records(output)
+                check_deadline(deadline,current)
                 require(all(record(output,row["path"])[1]=={key:row[key] for key in ("path","bytes","sha256")} for row in bound_inputs),
                     "An actual post-NCC input bound before CFD changed during the native solve.")
                 report.update(finalNativeFields=primary,finalNativeFieldRecords=fields,finiteNativeFieldEvidence=scans,nativeSamplingRecords=samples,
                     finiteNativeFieldsVerified=True,simulationExecuted=True)
+        current="final-immutable-evidence";check_deadline(deadline,current)
         require(all(record(output,path,LIMITS["maximumLogBytes"] if path.startswith("logs/") else None)[1]==row for path,row in {**immutable,**bound_rows}.items()),
             "An immutable source, geometry identity, runtime, input manifest, study, log or dictionary changed during execution.")
         require(all(record(output,row["path"])[1]==row for row in report["finalNativeFieldRecords"])
@@ -352,7 +411,10 @@ def run(geometry_native_directory,output_directory):
         require(ncc_diagnostic_records(output)==report["nativeNccDiagnosticRecords"],"An actual initial NCC coverage diagnostic changed or appeared after its native checkMesh binding.")
         near=near_points_evidence(output)
         require(near["files"]==report["nativeCheckMeshDiagnosticRecords"] and near["evidence"]==report["nativeNearPointsEvidence"],"An actual source-bound nearPoints diagnostic changed after native checkMesh binding.")
-        preparation.verify_output(output,after_native_ncc=True);original=preparation.validate_source(source)
+        current="final-copied-source-proof";check_deadline(deadline,current)
+        preparation.verify_output(output,after_native_ncc=True);check_deadline(deadline,current)
+        current="final-original-source-proof";check_deadline(deadline,current)
+        original=preparation.validate_source(source);check_deadline(deadline,current)
         require(original["sourceFileRecords"]==[{**row,"path":row["path"].removeprefix("source-teaching/")}
             for row in prepared["sourceEvidenceFileRecords"]],"The original geometry source inventory changed after its immutable copy was bound.")
         workspace_size(output);require(time.monotonic()<deadline,"The baseline deadline expired during final source and native byte verification.")
@@ -360,6 +422,8 @@ def run(geometry_native_directory,output_directory):
     except Exception as error:
         report.update(status="TEACHING_NATIVE_BASELINE_CORRECTION_REQUIRED",actualCfdRunVerified=False,
             diagnostic={"program":current,"type":type(error).__name__,"message":str(error)[:500]})
+    finally:
+        alarm.__exit__(None,None,None)
     try:report["retainedNativeLogRecords"]=retain_logs(output);report["workspaceBytes"]=workspace_size(output)
     except Exception as error:
         report.update(status="TEACHING_NATIVE_RETENTION_CORRECTION_REQUIRED",actualCfdRunVerified=False,

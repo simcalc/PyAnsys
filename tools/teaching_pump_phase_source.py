@@ -216,7 +216,7 @@ def bound_role(name):
     if name in TOP_FILES or name in {"logs/00-checkMesh.log", "logs/01-foamRun.log"}: return True
     if name.startswith("case/"):
         role = name.removeprefix("case/")
-        if role.startswith("0/"): return role in INPUTS or role in {"0/"+n for n in ("totalPressurePa", "U2", "yPlus")}
+        if role.startswith("0/"): return role in INPUTS or role in {"0/"+n for n in ("totalPressurePa", "U2", "yPlus", "cellToRegion")}
         return role in INPUTS or bool(re.fullmatch("constant/polyMesh/"+PRIMITIVES, role)
             or re.fullmatch("constant/polyMesh/sets/"+SET_NAMES, role)
             or role == "constant/fvMesh/polyFaces" or role in {"0/"+n for n in ("totalPressurePa", "U2", "yPlus")}
@@ -293,6 +293,12 @@ def phase_bindings(archive, files, admitted):
     required_case = {"case/"+name for name in INPUTS} | {"case/constant/polyMesh/"+name for name in ("points", "faces", "owner", "neighbour", "boundary", "cellZones")}
     require(required_case <= set(bound) and {"logs/00-checkMesh.log", "logs/01-foamRun.log"} <= set(bound),
         "Retain all exact initial/model controls, six mesh primitives and both actual native logs.")
+    region_path = "case/0/cellToRegion"
+    if region_path in files:
+        require(region_path not in descriptor_rows(manifest["files"])
+            and region_path in descriptor_rows(raw.get("nativeGeneratedDataRecords", []))
+            and region_path in descriptor_rows(acceptance["nativeEvidenceRecords"]),
+            "The native region diagnostic must be retained as generated/evidence data, never an authored initial/control input.")
     final = descriptor_rows(raw.get("finalNativeFieldRecords"))
     require(len(final) == 7 and {PurePosixPath(n).name for n in final} == {"p", "p_rgh", "U", "alpha.water", "k", "omega", "nut"}
         and len({str(PurePosixPath(n).parent) for n in final}) == 1
@@ -372,9 +378,16 @@ def source_face_velocity(raw, neighbour_prefix):
 def verified_payloads(archive, files, bound):
     """Check every member SHA/CRC/role before creating any destination."""
     rows = []
+    region_path = "case/0/cellToRegion"
+    require(files["logs/00-checkMesh.log"].file_size <= 8*1024**2, "Bound the generating log before allocation.")
+    with archive.open(files["logs/00-checkMesh.log"]) as stream: region_log = stream.read(8*1024**2 + 1)
+    require(len(region_log) == files["logs/00-checkMesh.log"].file_size,
+        "Bound the complete native generating checkMesh log before copying diagnostics.")
+    if b"cellToRegion" in region_log or re.search(rb"\*Number of regions:\s*2\s*$", region_log, re.M):
+        require(region_path in files and region_path in bound, "Retain the full native region diagnostic whenever the actual checkMesh log writes it.")
     for name, info in sorted(files.items()):
         source_uf = re.fullmatch(r"source-baseline/(?:impeller|volute)-case/500/Uf", name)
-        digest, size, native_data = sha256(), 0, bytearray() if name not in bound or source_uf else None
+        digest, size, native_data = sha256(), 0, bytearray() if name not in bound or source_uf or name == region_path else None
         with archive.open(info) as stream:
             while chunk := stream.read(CHUNK):
                 size += len(chunk); require(size <= info.file_size <= MAX_FILE_BYTES, "Bound each decompressed member before persistence.")
@@ -389,9 +402,33 @@ def verified_payloads(archive, files, bound):
                 require(neighbour in bound and neighbour in files, "Source Uf must bind its actual native mesh neighbour role.")
                 with archive.open(files[neighbour]) as stream: prefix = stream.read(65536)
                 source_face_velocity(native_data, prefix)
+            if name == region_path:
+                import teaching_pump_phase_case as native_regions
+                names = ["case/constant/polyMesh/" + n for n in ("owner", "neighbour", "cellZones")]
+                payloads = []
+                for mesh_name in names:
+                    require(mesh_name in files and mesh_name in bound, "Bind every native region-adjacency/zone source role.")
+                    with archive.open(files[mesh_name]) as stream: data = stream.read(MAX_FILE_BYTES + 1)
+                    require(len(data) == files[mesh_name].file_size <= MAX_FILE_BYTES
+                        and record_bytes(mesh_name, data) == bound[mesh_name], "Region diagnostic source mesh bytes changed.")
+                    payloads.append(data)
+                require(record_bytes("logs/00-checkMesh.log", region_log) == bound["logs/00-checkMesh.log"], "The actual generating region log bytes changed.")
+                proof = native_regions.native_cell_to_region(bytes(native_data), *payloads, region_log)
+                proof.update(path=region_path, sourceCheckMeshLog=bound["logs/00-checkMesh.log"],
+                    sourceMeshFileRecords=[bound[n] for n in names])
+                execution = member_json(archive, files, EXECUTION)[0]
+                evidence = execution.get("nativeGeneratedDataEvidence", [])
+                require(isinstance(evidence, list) and len(evidence) <= 64 and all(isinstance(p, dict) for p in evidence),
+                    "Retain a bounded typed native generated-data proof list.")
+                supplied = [p for p in evidence if p.get("path") == region_path]
+                require(supplied == [proof], "Current region labels/log/mesh proof must replay exactly against the raw generated-data evidence.")
         else: unbound_native_role(name, native_data)
         rows.append(row)
     return rows
+
+
+def record_bytes(name, raw):
+    return {"path": name, "bytes": len(raw), "sha256": sha256(raw).hexdigest()}
 
 
 def extract(archive_path, run_json, jobs_json, artifacts_json, output_directory, *, source_run_id, source_commit):

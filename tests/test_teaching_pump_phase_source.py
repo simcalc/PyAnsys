@@ -70,6 +70,36 @@ def phase_files(*, source_extras=None):
     files[tool.ACCEPTANCE]=tool.encoded(acceptance);return files
 
 
+def refreeze_region_files(files):
+    """Bind synthetic changed bytes; never bypass native diagnostic arithmetic."""
+    manifest=tool.json_data(files[tool.MANIFEST])
+    manifest['files']=[{**row,**record(row['path'],files[row['path']])} for row in manifest['files']]
+    files[tool.MANIFEST]=tool.encoded(manifest)
+    raw=tool.json_data(files[tool.EXECUTION]);raw['inputManifestSha256']=record(tool.MANIFEST,files[tool.MANIFEST])['sha256']
+    raw['retainedNativeLogRecords']=[record(row['path'],files[row['path']]) for row in raw['retainedNativeLogRecords']]
+    raw['nativeGeneratedDataRecords']=[record(row['path'],files[row['path']]) for row in raw.get('nativeGeneratedDataRecords',[])]
+    for proof in raw.get('nativeGeneratedDataEvidence',[]):
+        proof['sourceCheckMeshLog']=record('logs/00-checkMesh.log',files['logs/00-checkMesh.log'])
+        proof['sourceMeshFileRecords']=[record(row['path'],files[row['path']]) for row in proof['sourceMeshFileRecords']]
+    files[tool.EXECUTION]=tool.encoded(raw)
+    packet=tool.json_data(files[tool.ACCEPTANCE]);packet.update(manifest=manifest,inputManifest=manifest,
+        nativeInputManifestSha256=record(tool.MANIFEST,files[tool.MANIFEST])['sha256'],
+        nativeEvidenceRecords=[record(n,files[n]) for n in (tool.EXECUTION,tool.MANIFEST,'case/0/cellToRegion')])
+    files[tool.ACCEPTANCE]=tool.encoded(packet);return files
+
+
+def region_files():
+    from test_teaching_pump_phase_case import region_fixture
+    import teaching_pump_phase_case as native
+    data=region_fixture();files=phase_files();names=['case/0/cellToRegion','case/constant/polyMesh/owner',
+        'case/constant/polyMesh/neighbour','case/constant/polyMesh/cellZones','logs/00-checkMesh.log']
+    files.update(zip(names,data))
+    proof=native.native_cell_to_region(*data);proof.update(path=names[0],sourceCheckMeshLog=record(names[-1],data[-1]),
+        sourceMeshFileRecords=[record(n,d) for n,d in zip(names[1:4],data[1:4])])
+    raw=tool.json_data(files[tool.EXECUTION]);raw.update(nativeGeneratedDataRecords=[record(names[0],data[0])],nativeGeneratedDataEvidence=[proof])
+    files[tool.EXECUTION]=tool.encoded(raw);return refreeze_region_files(files)
+
+
 class PhaseSourceTests(unittest.TestCase):
     @contextmanager
     def context(self):
@@ -114,6 +144,28 @@ class PhaseSourceTests(unittest.TestCase):
             for name,raw in phase_files().items():self.assertEqual((output/tool.SOURCE_DIRECTORY/name).read_bytes(),raw)
             self.assertFalse((output/tool.SOURCE_DIRECTORY/tool.REPORT).exists())
             self.assertEqual(before,[sha256(p.read_bytes()).hexdigest() for p in args[:-1]])
+
+    def test_exact_generated_region_data_is_retained_and_independently_replayed(self):
+        with self.context() as root:
+            files=region_files();args=self.fixture(root,files=files);result=self.extract(args)
+            self.assertEqual((args[-1]/tool.SOURCE_DIRECTORY/'case/0/cellToRegion').read_bytes(),files['case/0/cellToRegion'])
+            self.assertFalse(result['currentSourceH0Verified']);self.assertFalse(result['actualCfdRunVerified'])
+            self.assertTrue(tool.bound_role('case/0/cellToRegion'));self.assertFalse(tool.bound_role('case/0/otherRegion'))
+
+    def test_region_diagnostic_cannot_be_authored_omitted_relabelled_or_rehashed_invalid(self):
+        for mutation in ('authored','missing-generated','proof','labels','count','log'):
+            with self.subTest(mutation=mutation),self.context() as root:
+                files=region_files()
+                if mutation=='authored':
+                    manifest=tool.json_data(files[tool.MANIFEST]);manifest['files'].append(record('case/0/cellToRegion',files['case/0/cellToRegion']));files[tool.MANIFEST]=tool.encoded(manifest)
+                elif mutation=='missing-generated':
+                    raw=tool.json_data(files[tool.EXECUTION]);raw['nativeGeneratedDataRecords']=[];files[tool.EXECUTION]=tool.encoded(raw)
+                elif mutation=='proof':
+                    raw=tool.json_data(files[tool.EXECUTION]);raw['nativeGeneratedDataEvidence'][0]['allNativeCellLabelsChecked']=3;files[tool.EXECUTION]=tool.encoded(raw)
+                elif mutation=='labels':files['case/0/cellToRegion']=files['case/0/cellToRegion'].replace(b'4 (0 0 1 1)',b'4 (0 1 1 1)')
+                elif mutation=='count':files['case/0/cellToRegion']=files['case/0/cellToRegion'].replace(b'4 (0 0 1 1)',b'3 (0 1 1)')
+                else:files['logs/00-checkMesh.log']=files['logs/00-checkMesh.log'].replace(b'cells: 4',b'cells: 5')
+                self.rejected(self.fixture(root,files=refreeze_region_files(files)))
 
     def test_exact_run_head_workflow_public_repository_and_success_are_required(self):
         mutations=[("head_sha","b"*40),("path",".github/workflows/other.yml"),("event","push"),("status","in_progress"),

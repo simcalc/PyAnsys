@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tools'))
 import teaching_pump_sliding_case as case
 from test_teaching_pump_pressure_case import source_fixture as upstream_fixture
+from test_teaching_pump_phase_case import write_region_fixture
 
 
 def source_fixture(root):
@@ -91,6 +92,16 @@ class SlidingRecipeTests(unittest.TestCase):
 
 class SlidingPreparationTests(unittest.TestCase):
     def fixture(self,root):return source_fixture(root)
+
+    def test_sliding_retains_native_regions_as_data_not_initial_solver_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);write_region_fixture(root)
+            with self.assertRaises(ValueError):case.generated_data(root)
+            rows,proofs=case.generated_data(root,after_native_execution=True)
+            self.assertEqual(rows,[case.read(root,case.phase.NATIVE_REGION_PATH)[1]])
+            self.assertFalse(proofs[0]['initialSolverState']);self.assertTrue(proofs[0]['regionLabelsBoundToActualCellZones'])
+            path=root/case.phase.NATIVE_REGION_PATH;path.write_bytes(path.read_bytes().replace(b'4 (0 0 1 1)',b'4 (0 1 1 1)'))
+            with self.assertRaises(ValueError):case.generated_data(root,after_native_execution=True)
 
     def test_motion_preserves_the_bound_uniform_outlet_without_inheriting_flow_results(self):
         with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'RUNNER_TEMP':temp}):

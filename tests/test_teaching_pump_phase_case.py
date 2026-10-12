@@ -30,6 +30,27 @@ def save(root, relative, value):
     return write(root, relative, case.encoded(value))
 
 
+def region_fixture():
+    """Synthetic four-cell connectivity/diagnostic data; no volume/CFD proof."""
+    def labels(name, body, location="constant/polyMesh"):
+        return (case.base.foam_header(name, "labelList", location) + body + "\n").encode("ascii")
+    raw = labels("cellToRegion", "4 (0 0 1 1)", "0")
+    owner = labels("owner", "8 (0 2 0 1 1 2 3 3)")
+    neighbour = labels("neighbour", "2 (1 3)")
+    zones = (case.base.foam_header("cellZones", "cellZoneList", "constant/polyMesh")
+        + "2 (rotating-fluid {type cellZone; cellLabels List<label> 2 (0 1);} stationary-fluid {type cellZone; cellLabels List<label> 2 (2 3);})\n").encode("ascii")
+    log = b'cells: 4\n   *Number of regions: 2\n  <<Writing region information to "0/cellToRegion"\n  <<Writing region 0 (fully disconnected) with 2 cells to cellSet region0\n  <<Writing region 1 (fully disconnected) with 2 cells to cellSet region1\nMesh OK.\nEnd\n'
+    return raw, owner, neighbour, zones, log
+
+
+def write_region_fixture(root):
+    raw, owner, neighbour, zones, log = region_fixture()
+    for name, data in ((case.NATIVE_REGION_PATH, raw), ("case/constant/polyMesh/owner", owner),
+        ("case/constant/polyMesh/neighbour", neighbour), ("case/constant/polyMesh/cellZones", zones), ("logs/00-checkMesh.log", log)):
+        write(root, name, data)
+    return raw
+
+
 def mocked_producer_admission():
     """Mock only original CAD/native producer admission and installed binaries.
 
@@ -126,6 +147,48 @@ class TeachingPhaseCaseTests(unittest.TestCase):
         stack = mocked_producer_admission()
         stack.enter_context(patch.dict(os.environ, {"RUNNER_TEMP": temp}))
         return stack
+
+    def test_native_region_diagnostic_binds_complete_connectivity_log_and_zones(self):
+        data = region_fixture(); proof = case.native_cell_to_region(*data)
+        self.assertEqual(proof["allNativeCellLabelsChecked"], 4)
+        self.assertEqual(proof["regionToCellZone"], {"0": {"cellZone": "rotating-fluid", "cellCount": 2},
+            "1": {"cellZone": "stationary-fluid", "cellCount": 2}})
+        self.assertFalse(proof["authoredInput"]); self.assertFalse(proof["initialSolverState"])
+        self.assertFalse(proof["flowCalculated"]); self.assertFalse(proof["componentOffsetsAssumed"])
+        swapped = data[0].replace(b"4 (0 0 1 1)", b"4 (1 1 0 0)")
+        remapped = case.native_cell_to_region(swapped, *data[1:])
+        self.assertEqual(remapped["regionToCellZone"]["0"]["cellZone"], "stationary-fluid")
+
+    def test_native_region_wrong_role_count_labels_adjacency_zone_or_log_rejects(self):
+        data = region_fixture()
+        mutations = [(0, b"labelList", b"volScalarField"), (0, b'location "0";', b'location "0.1";'),
+            (0, b"4 (0 0 1 1)", b"3 (0 1 1)"), (0, b"4 (0 0 1 1)", b"4 (0 0 1 2)"),
+            (0, b"4 (0 0 1 1)", b"4 (0 1 1 1)"), (0, b"4 (0 0 1 1)", b"4 (0 0 1.0 1)"),
+            (0, b"4 (0 0 1 1)", b"4 (0 0 1 1)\n#include forbidden"),
+            (0, b"object cellToRegion;", b"object cellToRegion; secret credential;"),
+            (2, b"2 (1 3)", b"1 (1)"), (3, b"List<label> 2 (0 1)", b"List<label> 2 (0 2)"),
+            (4, b"cells: 4", b"cells: 5"), (4, b"*Number of regions: 2", b"*Number of regions: 3"),
+            (4, b"region 1 (fully disconnected) with 2", b"region 1 (fully disconnected) with 1"),
+            (4, b'"0/cellToRegion"', b'"0/other"'), (4, b"End\n", b""),
+            (4, b"Mesh OK.", b"FOAM FATAL ERROR")]
+        for index, old, new in mutations:
+            with self.subTest(index=index, replacement=new):
+                altered = list(data); altered[index] = altered[index].replace(old, new)
+                with self.assertRaises(ValueError): case.native_cell_to_region(*altered)
+
+    def test_generated_region_record_is_postnative_only_and_missing_writer_data_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); write_region_fixture(root)
+            with self.assertRaises(ValueError): case.native_region_data(root)
+            rows, evidence = case.native_region_data(root, after_native_execution=True)
+            self.assertEqual(rows, [case.read(root, case.NATIVE_REGION_PATH)[1]])
+            self.assertEqual(evidence[0]["sourceCheckMeshLog"], case.read(root, "logs/00-checkMesh.log")[1])
+            self.assertEqual(len(evidence[0]["sourceMeshFileRecords"]), 3)
+            self.assertEqual(case.native_generated_data(root, after_native_execution=True), (rows, evidence))
+            (root / case.NATIVE_REGION_PATH).unlink()
+            with self.assertRaises(ValueError): case.native_region_data(root, after_native_execution=True)
+            write_region_fixture(root); (root / "logs/00-checkMesh.log").unlink()
+            with self.assertRaises(ValueError): case.native_region_data(root, after_native_execution=True)
 
     def test_pure_recipe_uses_active_absolute_pa_and_stationary_intake(self):
         study = case.baseline.study_packet({}, {})
