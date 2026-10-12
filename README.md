@@ -779,3 +779,34 @@ therefore remain exact. Published topology is independently reconstructed
 and replayed, with the postprocessor source bytes bound in the manifest.
 This operation is not a native-quality acceptance: full component and merged
 mesh checks and the original NCC coverage criteria still have to pass.
+
+The actual refined trial
+[38186908484](https://github.com/simcalc/PyAnsys/actions/runs/38186908484)
+passed all **nine native geometry stages** and **741 contract tests**.
+Its 205,611 cells comprise 103,818 impeller and 101,793 volute cells.
+All three full `checkMesh` checks passed. The minimum native determinant
+was 0.0077888323, above the unchanged 0.001 criterion; source/target minimum
+NCC coverage was 0.999999999999993/0.999999999999995. Both complete artifact
+archives, retained file hashes, converters, physical walls and merged mesh
+were independently replayed. This accepts this authored classroom mesh only;
+no flow solver ran in that geometry-only workflow.
+
+### Fresh authored steady baseline
+
+The manual `Authored classroom pump steady MRF baseline` workflow constructs
+fresh CAD and repeats all geometry gates in the same public FREE run before
+authoring a new single-phase SST/MRF study. It never imports old solution
+fields or head. Its explicit teaching inputs are water at 293.15 K,
+998.2 kg/m3 and 0.001002 Pa s, 1450 rpm, 90 kg/s, and 300000 Pa absolute
+external inlet total pressure. The intake patches are explicitly stationary.
+Native gravity is zero; head is pressure/kinetic rise with a declared zero
+elevation correction, not a measured manufacturer performance result.
+
+The baseline uses one CPU, 4 GiB, 1200 seconds, 1 GiB workspace and 500 steady
+iterations. Actual mesh, source, runtime, logs, full final fields, signed flow
+samplers and initial NCC diagnostic VTK files remain byte-bound. A separate
+Python reducer requires finite fields, unchanged interface coverage, residual,
+conservation, stationary head/flow and noncavitating pressure criteria.
+Native completion and numerical acceptance are separate. Numerical acceptance
+on this mesh cannot qualify wall resolution, mesh/time convergence, physical
+validation, active-phase H0, cavitation/NPSHr, moving-rotor transient or restart.

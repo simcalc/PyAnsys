@@ -1,0 +1,145 @@
+name: Authored classroom pump steady MRF baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesh_level:
+        description: Explicit authored classroom mesh resolution
+        required: true
+        default: coarse
+        type: choice
+        options: [coarse, medium, fine]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: authored-teaching-pump-baseline
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    name: FREE authored CAD, native geometry and numerical MRF baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      TEACHING_MESH_LEVEL: ${{ inputs.mesh_level }}
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+    steps:
+      - name: Check out the independent public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the exact public FREE standard runner and authored resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/public_runner_guard.py
+          case "$TEACHING_MESH_LEVEL" in coarse|medium|fine) ;; *) exit 2 ;; esac
+      - name: Set up CPython 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12.10'
+      - name: Install the isolated pinned CAD and source readers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install --no-install-recommends -y libglu1-mesa
+          python -m venv "$RUNNER_TEMP/teaching-pump-python"
+          "$RUNNER_TEMP/teaching-pump-python/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4 gmsh==4.15.2
+          "$RUNNER_TEMP/teaching-pump-python/bin/python" -m pip check
+      - name: Verify engineering, geometry, provenance and native admission contracts
+        run: '"$RUNNER_TEMP/teaching-pump-python/bin/python" -B -m unittest discover -s tests -v'
+      - name: Generate explicitly authored SI CAD and one shared interface mesh
+        env:
+          PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP,TEACHING_MESH_LEVEL \
+            systemd-run --scope --unit="teaching-pump-cad-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 930s \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/teaching_pump_geometry.py \
+            --output-directory "$RUNNER_TEMP/teaching-pump-mesh" --mesh-level "$TEACHING_MESH_LEVEL"
+      - name: Install checksum-pinned OpenFOAM Foundation 12
+        run: bash tools/install_openfoam12.sh
+      - name: Require actual conversion, every-cell quality and shared-interface coverage
+        env:
+          PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="teaching-pump-native-${GITHUB_RUN_ID}" \
+            -p MemoryMax=2147483648 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 630s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/run_teaching_pump_geometry.py \
+            --geometry-directory "$RUNNER_TEMP/teaching-pump-mesh" --output-directory "$RUNNER_TEMP/teaching-pump-native"
+      - name: Execute a fresh bounded authored steady SST MRF study
+        env:
+          PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +eu
+          source /opt/openfoam12/etc/bashrc
+          foam_source_status=$?
+          set -euo pipefail
+          test "$foam_source_status" -eq 0
+          test "${WM_PROJECT_VERSION:-}" = 12
+          foam_library_path="${LD_LIBRARY_PATH:-}"
+          test -n "$foam_library_path"
+          sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP \
+            systemd-run --scope --unit="teaching-pump-mrf-${GITHUB_RUN_ID}" \
+            -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+            /usr/bin/timeout --kill-after=10s 1260s \
+            /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+            "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/run_teaching_pump_baseline.py \
+            --geometry-native-directory "$RUNNER_TEMP/teaching-pump-native" --output-directory "$RUNNER_TEMP/teaching-pump-baseline"
+      - name: Reduce actual authored MRF evidence and require numerical acceptance
+        run: '"$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_baseline.py --execution-directory "$RUNNER_TEMP/teaching-pump-baseline"'
+      - name: Retain authored CAD, parameters and actual component meshes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: authored-teaching-pump-geometry-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/teaching-pump-mesh/
+            ${{ runner.temp }}/teaching-pump-mesh-native.log
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Retain separate actual native quality and interface diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: authored-teaching-pump-native-${{ github.run_id }}
+          path: ${{ runner.temp }}/teaching-pump-native/
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Retain separate authored physics and numerical acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: authored-teaching-pump-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/teaching-pump-baseline/
+          if-no-files-found: warn
+          retention-days: 1
