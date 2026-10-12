@@ -39,7 +39,7 @@ FALSE_FLAGS = ("commandExecutionPerformedByThisTool","simulationExecuted","actua
     "restartVerified","manufacturerPublishedGeometry","originalFluentGeometryReproduced","baselineFieldsCopied","mainApplicationWrites")
 LIMITS = {"maximumSeconds":1200,"maximumCpus":1,"maximumMemoryBytes":4*1024**3,"maximumWorkspaceBytes":MAX_WORKSPACE,
     "maximumFileBytes":MAX_FILE,"maximumReportBytes":MAX_REPORT,"maximumLogBytes":4*1024**2,"maximumSourceRecords":MAX_SOURCE_RECORDS}
-NUMERICAL_PROFILE = {"id":"teaching-upwind-pressure-gradient-stabilization-v2","convection":"bounded Gauss upwind for U, k and omega",
+NUMERICAL_PROFILE = {"id":"teaching-upwind-consistent-coupling-v3","convection":"bounded Gauss upwind for U, k and omega",
     "convectiveOrder":1,"pressureLinearTolerance":1e-8,"pressureRelativeTolerance":0.,"pressureMaximumIterations":100,
     "transportLinearTolerance":1e-7,"transportRelativeTolerance":.01,"transportMinimumIterations":1,"transportMaximumIterations":100,
     "pressureRelaxation":.2,"transportRelaxation":.3,"steadyIterationCount":500,
@@ -47,13 +47,18 @@ NUMERICAL_PROFILE = {"id":"teaching-upwind-pressure-gradient-stabilization-v2","
         "basis":"Native cell/neighbour and coupled-patch bounds limit extrapolated face values by scaling the pressure gradient; no stored pressure or velocity field is clipped.",
         "nativeFieldClippingPerformed":False},
     "velocityGradient":"cellLimited Gauss linear 1","velocityGradientChanged":False,
-    "basis":"A predeclared fresh first-order candidate after run38197674270 reached500/End with the correct uniform outlet but retained large near-cap owner velocity and failed pressure residual, head stationarity and liquid-domain criteria. The new delta is only the pressure gradient scheme; this is not a proven diagnosis or convergence prediction. Physical BCs, operating inputs, mesh,500 iterations,1200s budget and acceptance criteria are unchanged.",
-    "accuracyQualified":False,"convergencePredicted":False,"priorRejectedRunId":"38197674270",
-    "priorNumericalProfileId":"teaching-upwind-stabilization-v1",
+    "pressureGradientChanged":False,
+    "pressureMomentumCoupling":{"algorithm":"SIMPLE","consistent":True,"previousConsistent":False,
+        "nativeKeyword":"SIMPLE.consistent yes","onlyNewNativeControl":True,
+        "basis":"Pinned Foundation12 uses the momentum diagonal and UEqn.H1() to compute rAtU and correct HbyA/phiHbyA before solving pressure. This is a controlled coupling candidate, not a proven cause of the rejected solution or a guarantee of convergence."},
+    "basis":"A predeclared fresh one-factor candidate after run38202150699 completed500/End with mean head19.959m, failed head stationarity/pressure residual, negative absolute pressure and large near-cap cell velocity despite prescribed outlet and conserved phi. Only SIMPLE.consistent changes to yes. Both existing cellLimited gradients, all schemes, physical BCs, operating inputs, mesh,500 iterations,1200s budget and acceptance criteria are unchanged. Collocated corrected phi and relaxed cell U need not coincide before convergence; this does not establish intrinsic physical unsteadiness or a proven implementation defect.",
+    "accuracyQualified":False,"convergencePredicted":False,"priorRejectedRunId":"38202150699",
+    "priorNumericalProfileId":"teaching-upwind-pressure-gradient-stabilization-v2",
     "sources":["https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/interpolation/surfaceInterpolation/limitedSchemes/upwind/upwind.H",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/finiteVolume/convectionSchemes/boundedConvectionScheme/boundedConvectionScheme.C",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/MomentumTransportModels/momentumTransportModels/Base/kOmegaSST/kOmegaSSTBase.C",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/finiteVolume/gradSchemes/limitedGradSchemes/cellLimitedGrad/cellLimitedGrad.C",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/cfdTools/general/solutionControl/solutionControl/fluidSolutionControl/fluidSolutionControl.C",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/applications/modules/incompressibleFluid/momentumPredictor.C",
         "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/applications/modules/incompressibleFluid/correctPressure.C"]}
 ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,"muPaS":.001002,"gMS2":9.81,
@@ -71,7 +76,7 @@ SAMPLING = {"flowUnits":"m3/s outward positive","weighting":"signed-outward-phi"
     "kineticMoment":"mean(U_absolute_squared)","pressureUnit":"Pa","pressureBasis":"absolute",
     "totalPressureField":"998.2*pKinematic + 0.5*998.2*mean(U_absolute_squared) + 300000",
     "staticPressureField":"998.2*pKinematic; add300000Pa exactly once in reduction","iterationIndexIsPhysicalTime":False}
-CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind pressure-gradient candidate and a uniform normal outlet profile assumption bound to every actual rectangular outlet facet. Only grad(p) adds native cellLimited reconstruction; the existing grad(U), other controls and all acceptance criteria are retained, with no stored-field clipping. The outlet profile is not measured and neither numerical choice predicts convergence. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
+CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with a predeclared one-factor SIMPLE consistent-pressure-momentum-coupling candidate. The previous first-order upwind scheme, both limited gradients, uniform normal outlet assumption, other controls, resource limits and all acceptance criteria remain unchanged; no stored field is clipped. The outlet profile is not measured and this algorithm choice does not establish a cause or predict convergence. Geometry acceptance and a recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
 encoded,record,json_file = geometry_case.encoded,geometry_case.record,geometry_case.json_file
 
 
@@ -242,9 +247,21 @@ def _validate_source(root):
         "sourceFileRecords":rows,"snapshots":snapshots,"mergedNativeMeshEvidence":merged,"nativeMeshQuality":quality,"outletProfileEvidence":outlet_proof}
 
 
+def consistent_solution(previous):
+    """Change exactly one reviewed algorithm block; never rewrite unknown input."""
+    block=b"SIMPLE {nNonOrthogonalCorrectors 2;}"
+    require(isinstance(previous,bytes) and previous.count(block)==1
+        and len(re.findall(rb"\bSIMPLE\s*\{",previous))==1 and not re.search(rb"\bconsistent\b",previous),
+        "Require the exact single reviewed SIMPLE block without an earlier consistent override.")
+    return previous.replace(block,block[:-1]+b" consistent yes;}")
+
+
 def case_files(component,*,default_faces=True):
     require(component in geometry_case.COMPONENTS and type(default_faces) is bool,"Use an exact component and actual optional empty defaultFaces declaration.")
     result={p:text.encode("ascii") for p,text in physics.case_files(component,300000).items()}
+    # Reject changed upstream coupling before constructing our existing v2
+    # linear-solver/relaxation profile; discard no unreviewed algorithm key.
+    consistent_solution(result["system/fvSolution"])
     # Prescribe the explicitly declared normal plug outlet. Actual cap geometry
     # is independently re-read in validate_source BEFORE any fresh case writes.
     q=re.escape(format(outlet.Q,".17g").encode("ascii"))
@@ -269,6 +286,7 @@ def case_files(component,*,default_faces=True):
     result["system/fvSolution"]=(base.foam_header("fvSolution")
         + 'solvers {p {solver GAMG; tolerance 1e-8; relTol 0; smoother GaussSeidel; maxIter 100;} "(U|k|omega)" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-7; relTol 0.01; minIter 1; maxIter 100;}}\n'
         + 'SIMPLE {nNonOrthogonalCorrectors 2;}\nrelaxationFactors {fields {p 0.2;} equations {U 0.3; k 0.3; omega 0.3;}}\n').encode("ascii")
+    result["system/fvSolution"]=consistent_solution(result["system/fvSolution"])
     # Foundation12 wallDist reads fvSchemes.wallDist when SST requests distance.
     # This new authored lane supplies the native method; old routes are unchanged.
     require(not re.search(rb"\bwallDist\s*\{",result["system/fvSchemes"]),"The reviewed baseline recipe must define wallDist exactly once.")

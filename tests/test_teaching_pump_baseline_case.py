@@ -172,7 +172,7 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             self.assertIn(b'endTime 500;',fresh['system/controlDict'])
         profile=case.ASSUMPTIONS['numericalStabilization']
         self.assertEqual(profile['convectiveOrder'],1);self.assertFalse(profile['accuracyQualified']);self.assertFalse(profile['convergencePredicted'])
-        self.assertEqual(profile['priorRejectedRunId'],'38197674270')
+        self.assertEqual(profile['priorRejectedRunId'],'38202150699')
         self.assertEqual(case.LIMITS['maximumSeconds'],1200)
 
     def test_pressure_and_transport_linear_stopping_and_underrelaxation_are_separate(self):
@@ -184,8 +184,9 @@ class TeachingBaselineCaseTests(unittest.TestCase):
         self.assertIn('minIter 1;',transport);self.assertIn('maxIter 100;',transport)
         self.assertIn('fields {p 0.2;}',raw);self.assertIn('equations {U 0.3; k 0.3; omega 0.3;}',raw)
 
-    def test_pressure_gradient_candidate_is_the_only_new_native_numerical_delta(self):
-        # Complete prior authored scheme contract; no native solver is run.
+    def test_pressure_gradient_candidate_is_preserved_unchanged_in_new_coupling_profile(self):
+        # Complete earlier gradient contract; only the already-approved
+        # pressure gradient remains added to the v1 scheme. No solver is run.
         previous = (case.base.foam_header('fvSchemes')
             + 'ddtSchemes {default steadyState;}\n'
             + 'gradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1;}\n'
@@ -203,7 +204,7 @@ class TeachingBaselineCaseTests(unittest.TestCase):
                 self.assertEqual(fresh['system/controlDict'],case.physics.case_files(component,300000)['system/controlDict'].encode('ascii'))
                 self.assertEqual(fresh['0/p'],case.physics.case_files(component,300000)['0/p'].encode('ascii'))
         profile=case.NUMERICAL_PROFILE
-        self.assertEqual(profile['id'],'teaching-upwind-pressure-gradient-stabilization-v2')
+        self.assertEqual(profile['id'],'teaching-upwind-consistent-coupling-v3')
         self.assertEqual(profile['pressureGradient']['scheme'],'cellLimited Gauss linear 1')
         self.assertEqual(profile['pressureGradient']['limiterCoefficient'],1)
         self.assertFalse(profile['pressureGradient']['nativeFieldClippingPerformed'])
@@ -212,6 +213,50 @@ class TeachingBaselineCaseTests(unittest.TestCase):
         self.assertEqual((profile['steadyIterationCount'],case.LIMITS['maximumSeconds']),(500,1200))
         self.assertEqual((case.PARAMETERS['speedRpm'],case.PARAMETERS['massFlowKgS']),(1450.,90.))
         self.assertEqual(case.ASSUMPTIONS['externalTotalPressureAbsolutePa'],300000.)
+
+    def test_consistent_is_the_only_delta_from_complete_prior_native_case_contract(self):
+        # Golden v2 dictionary bodies match the actual rejected382021 recipe.
+        # This is a byte contract fixture, not native CFD or stored acceptance.
+        prior_solution=(case.base.foam_header('fvSolution')
+            + 'solvers {p {solver GAMG; tolerance 1e-8; relTol 0; smoother GaussSeidel; maxIter 100;} "(U|k|omega)" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-7; relTol 0.01; minIter 1; maxIter 100;}}\n'
+            + 'SIMPLE {nNonOrthogonalCorrectors 2;}\nrelaxationFactors {fields {p 0.2;} equations {U 0.3; k 0.3; omega 0.3;}}\n').encode('ascii')
+        prior_schemes=(case.base.foam_header('fvSchemes')
+            + 'ddtSchemes {default steadyState;}\ngradSchemes {default Gauss linear; grad(U) cellLimited Gauss linear 1; grad(p) cellLimited Gauss linear 1;}\n'
+            + 'divSchemes {default none; div(phi,U) bounded Gauss upwind; div(phi,k) bounded Gauss upwind; div(phi,omega) bounded Gauss upwind; div((nuEff*dev2(T(grad(U))))) Gauss linear;}\n'
+            + 'laplacianSchemes {default Gauss linear limited corrected 0.5;}\ninterpolationSchemes {default linear;}\nsnGradSchemes {default limited corrected 0.5;}\nwallDist {method meshWave;}\n').encode('ascii')
+        for component in ('impeller','volute'):
+            original={p:text.encode('ascii') for p,text in case.physics.case_files(component,300000).items()}
+            # Independent golden prior native outlet block (the declared v2
+            # rectangle velocity); all other field/model/system roles retained.
+            old=b'type flowRateOutletVelocity; volumetricFlowRate 0.090162292125826479; value uniform (0 0 0);'
+            self.assertEqual(original['0/U'].count(old),1)
+            original['0/U']=original['0/U'].replace(old,b'type fixedValue; value uniform (0 18.786550564837889 0);')
+            prior={**original,'system/fvSchemes':prior_schemes,'system/fvSolution':prior_solution}
+            fresh=case.case_files(component)
+            self.assertEqual(set(fresh),set(prior))
+            for path in set(prior)-{'system/fvSolution'}:self.assertEqual(fresh[path],prior[path],path)
+            self.assertEqual(fresh['system/fvSolution'].count(b'consistent yes;'),1)
+            self.assertEqual(fresh['system/fvSolution'].replace(b' consistent yes;',b''),prior_solution)
+        self.assertEqual(case.NUMERICAL_PROFILE['priorNumericalProfileId'],'teaching-upwind-pressure-gradient-stabilization-v2')
+        self.assertTrue(case.NUMERICAL_PROFILE['pressureMomentumCoupling']['consistent'])
+        self.assertFalse(case.NUMERICAL_PROFILE['pressureMomentumCoupling']['previousConsistent'])
+        self.assertFalse(case.NUMERICAL_PROFILE['pressureGradientChanged'])
+        self.assertEqual(case.LIMITS,{'maximumSeconds':1200,'maximumCpus':1,'maximumMemoryBytes':4*1024**3,'maximumWorkspaceBytes':1024**3,
+            'maximumFileBytes':128*1024**2,'maximumReportBytes':128*1024,'maximumLogBytes':4*1024**2,'maximumSourceRecords':320})
+        self.assertFalse(case.NUMERICAL_PROFILE['convergencePredicted']);self.assertFalse(case.NUMERICAL_PROFILE['accuracyQualified'])
+
+    def test_changed_duplicate_or_predeclared_coupling_is_not_silently_overridden(self):
+        old='SIMPLE {nNonOrthogonalCorrectors 2;}'
+        variants=(old.replace('Correctors 2','Correctors 1'),old+'\n'+old,
+            old.replace('}', ' consistent no;}'),old.replace('}', ' consistent yes;}'),
+            old.replace('}', ' momentumPredictor no;}'),old.replace('SIMPLE','PIMPLE'))
+        source=case.physics.case_files
+        for variant in variants:
+            with self.subTest(variant=variant):
+                def changed(component,pressure):
+                    result=source(component,pressure);result['system/fvSolution']=result['system/fvSolution'].replace(old,variant);return result
+                with mock.patch.object(case.physics,'case_files',side_effect=changed),self.assertRaisesRegex(case.BaselineCaseIssue,'SIMPLE block'):
+                    case.case_files('impeller')
 
     def test_changed_duplicate_or_predeclared_pressure_gradient_is_not_silently_overridden(self):
         original=case.physics.case_files

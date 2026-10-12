@@ -929,7 +929,7 @@ one-CPU, 4-GiB, 1-GiB limits and numerical acceptance thresholds are unchanged.
 The combined source/runner/phase/import/sliding/reduction regression has 120
 passing tests. Those contract results do not qualify the rejected CFD fields.
 
-The next declared fresh candidate is
+The pressure-gradient candidate was
 `teaching-upwind-pressure-gradient-stabilization-v2`. It adds only
 `grad(p) cellLimited Gauss linear 1` to the previous scheme; `grad(U)` was
 already limited. Every physical boundary, mesh, operating quantity, other
@@ -941,6 +941,33 @@ local geometry-quality defect, while their unrestricted pressure-gradient
 reconstructions overshoot neighbouring values. This supports a controlled
 candidate trial, not a proven cause or promised convergence. The preparation
 and runner regression passes 48 tests before any new native result is known.
+
+Its actual fresh run
+[38202150699](https://github.com/simcalc/PyAnsys/actions/runs/38202150699),
+source commit `644a17f046a9cb0445688b52f6248f75d867dfc3`, passed 982 contract
+tests and completed the native 500-iteration calculation. The execution and
+acceptance reports were retained within the evidence deadline. The numerical
+reducer correctly rejected the fields: final-window head is 19.9591 m with
+2.8551% span (criterion 0.5%), pressure initial residual reaches 0.0187751
+(criterion 0.0001), and minimum static absolute pressure is -13.2664 MPa
+(liquid criterion greater than 2339 Pa). Independent mass balance, local
+continuity, NCC flux and coverage criteria pass. These independent results
+do not qualify the head, baseline or an active-phase H0. All 168 baseline
+archive members were checked, and all 205611 velocity/pressure cell values
+were independently inspected. The worst pressure is now adjacent to a rotor
+blade; the largest cell velocity remains adjacent to the prescribed outlet.
+Extending the same divergent local-pressure history is not an accepted fix.
+
+The next fresh controlled candidate is
+`teaching-upwind-consistent-coupling-v3`. Its only solver delta from the
+pressure-gradient trial is `SIMPLE {consistent yes;}`. The pinned native
+pressure corrector uses its consistent reciprocal diagonal in both the
+pressure equation and the matched velocity/face-flux corrections. This tests
+pressure-velocity coupling sensitivity; an unconverged cell velocity and a
+conservative face flux do not prove a software bug or predict this trial's
+convergence. The existing gradients, diffusion/convection schemes, mesh,
+physical boundary conditions, 500 iterations, resource limits and all
+acceptance thresholds remain unchanged. No rejected solution is reused.
 
 ### Separate native torque diagnostic
 
@@ -967,6 +994,16 @@ warnings, actual finite tables and unchanged original/copied inputs are
 checked. A successful utility exit is insufficient. This diagnostic does not
 qualify the failed baseline, an efficiency, an energy balance, H0, NPSH3,
 mesh/time convergence, physical transient or restart.
+
+The actual native diagnostic
+[38203360565](https://github.com/simcalc/PyAnsys/actions/runs/38203360565)
+completed without native warnings and passed 23 contract tests. Its 46-member
+archive was fully checked. On the fixed older run `38197674270`, the signed
+fluid-on-rotor axial moment is -110.4614 N m and the corresponding signed
+rotor-to-fluid power is 16772.8569 W. The sampled hydraulic power from that
+same rejected state is 78.7267 W. These are separate diagnostic measurements,
+not an efficiency or a qualified energy balance; they are not measurements
+of the later pressure-gradient candidate.
 
 ### Conditional active cavitation reference
 
