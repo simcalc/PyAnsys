@@ -15,6 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import teaching_pump_geometry as geometry
+import teaching_tetra_corner_refinement as corner
 
 
 def cubes():
@@ -45,10 +46,15 @@ def retained_fixture(root):
     """Exercise byte replay with explicit synthetic BREP; no OCC has executed."""
     root.mkdir()
     data = cubes(); plan = geometry.teaching_plan(); components = []
+    threshold = max(n for item in data.values() for n in item['points']); next_node = threshold + 1
+    for name, item in list(data.items()):
+        refined, proof, next_node = corner.refine_component(item, next_node, threshold)
+        data[name] = geometry.component_data(name, refined['points'], refined['tets'], refined['patches'])
+        data[name]['cornerSubdivisionEvidence'] = proof
     for name, item in data.items():
         (root / (name + ".msh")).write_bytes(geometry.msh_bytes(name, item))
         components.append({"component":name,"cellZone":"rotating-fluid" if name == "impeller" else "stationary-fluid",
-            **item["metrics"],"generatedFile":{**geometry.record(root / (name + ".msh")),"format":"gmsh-msh2.2-ascii"},
+            **item["metrics"],"cornerSubdivisionEvidence":item['cornerSubdivisionEvidence'],"generatedFile":{**geometry.record(root / (name + ".msh")),"format":"gmsh-msh2.2-ascii"},
             "cadFluidVolumeM3":1.,"cadMeshRelativeVolumeDifference":0.})
     (root / "teaching-pump.brep").write_bytes(b"SYNTHETIC-ONLY-NO-NATIVE-OCC\n")
     roles = {}; tag = 20
@@ -62,15 +68,17 @@ def retained_fixture(root):
         "cadSurfaceClassificationToleranceM":3e-7,"cadSurfaceRolesBasedOnAuthoredAnalyticRegions":True}
     source = Path(geometry.__file__)
     generator = {"path":"tools/teaching_pump_geometry.py","bytes":source.stat().st_size,"sha256":sha256(source.read_bytes()).hexdigest()}
+    processor_source = Path(corner.__file__)
+    processor = {"path":"tools/teaching_tetra_corner_refinement.py","bytes":processor_source.stat().st_size,"sha256":sha256(processor_source.read_bytes()).hexdigest()}
     manifest = {"schemaVersion":geometry.MANIFEST_SCHEMA,"provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI",
         "parameters":plan["parameters"],"parametersSha256":plan["parametersSha256"],"geometryIdentity":plan["geometryIdentity"],
         "geometryIdentitySha256":plan["geometryIdentitySha256"],"meshLevel":"coarse","meshSizeM":plan["meshSizeM"],
-        "generatorSourceCommit":"a"*40,"generatorSourceFile":generator,"cadEvidenceSha256":sha256(geometry.encoded(cad)).hexdigest(),
+        "generatorSourceCommit":"a"*40,"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,"cadEvidenceSha256":sha256(geometry.encoded(cad)).hexdigest(),
         "limits":dict(geometry.LIMITS),"files":[geometry.record(root / name) for name in geometry.FILES],"mainApplicationWrites":False}
     (root / geometry.MANIFEST).write_bytes(geometry.encoded(manifest))
     report = {"schemaVersion":geometry.SCHEMA,"createdAt":"2026-10-12T12:00:00+00:00",
         "status":"AUTHORED_CAD_VOLUME_MESH_NATIVE_CHECKS_REQUIRED","provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI",
-        "generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,
+        "generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
         "parametersSha256":plan["parametersSha256"],"geometryIdentitySha256":plan["geometryIdentitySha256"],
         "inputManifestSha256":sha256(geometry.encoded(manifest)).hexdigest(),"parameters":plan["parameters"],"meshLevel":"coarse",
         "limits":dict(geometry.LIMITS),"gmshVersion":geometry.GMSH_VERSION,"nativeCADConstructed":True,"volumeMeshGenerated":True,

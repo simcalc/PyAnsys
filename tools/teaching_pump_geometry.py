@@ -293,6 +293,7 @@ def parse_msh(component, raw):
 
 
 def mesh_data(gmsh, cad):
+    import teaching_tetra_corner_refinement as corner
     tags,xyz,_=gmsh.model.mesh.getNodes();require(len(tags)<=LIMITS["maximumCombinedNodes"] and len(xyz)==3*len(tags),"Actual whole-model points must remain bounded.")
     points={int(n):tuple(float(v) for v in xyz[i*3:i*3+3]) for i,n in enumerate(tags)}
     require(len(points)==len(tags) and all(all(math.isfinite(v) for v in p) for p in points.values()),"Every native CAD mesh node must be finite and uniquely labelled.")
@@ -311,6 +312,12 @@ def mesh_data(gmsh, cad):
                 for labels in conn:require(len(labels)%3==0,"Complete boundary triangles are required.");triangles.extend(tuple(int(v) for v in labels[i:i+3]) for i in range(0,len(labels),3))
             surfaces[role]=triangles
         result[name]=component_data(name,points,tets,surfaces)
+    original_max=max(n for item in result.values() for n in item["points"])
+    next_node=original_max+1
+    for name,item in list(result.items()):
+        refined,proof,next_node=corner.refine_component(item,next_node,original_max)
+        result[name]=component_data(name,refined["points"],refined["tets"],refined["patches"])
+        result[name]["cornerSubdivisionEvidence"]=proof
     require(sum(v["metrics"]["cellCount"] for v in result.values())<=LIMITS["maximumCombinedCells"],"Actual combined classroom cells exceed500000; no automatic mesh-size fallback.")
     require(sum(v["metrics"]["nodeCount"] for v in result.values())<=LIMITS["maximumCombinedNodes"],"Duplicated interface node storage must remain within the one-million combined node bound.")
     return result
@@ -354,15 +361,18 @@ def generate(parameters, output_directory, mesh_level="coarse"):
             cad_volume=cad["cadFluidVolumesM3"][name];difference=abs(item["metrics"]["totalCellVolumeM3"]-cad_volume)/cad_volume
             require(math.isfinite(cad_volume) and cad_volume>0 and difference<=.005,"Actual tessellated fluid volume must agree with authored CAD within declared0.5%; quality is separate.")
             components.append({"component":name,"cellZone":"rotating-fluid" if name=="impeller" else "stationary-fluid",**item["metrics"],
+                               "cornerSubdivisionEvidence":item["cornerSubdivisionEvidence"],
                                "generatedFile":{**record(target),"format":"gmsh-msh2.2-ascii"},"cadFluidVolumeM3":cad_volume,"cadMeshRelativeVolumeDifference":difference})
         source=Path(__file__).resolve();generator={"path":"tools/teaching_pump_geometry.py","bytes":source.stat().st_size,"sha256":sha256(source.read_bytes()).hexdigest()}
+        post_source=source.with_name("teaching_tetra_corner_refinement.py")
+        processor={"path":"tools/teaching_tetra_corner_refinement.py","bytes":post_source.stat().st_size,"sha256":sha256(post_source.read_bytes()).hexdigest()}
         manifest={"schemaVersion":MANIFEST_SCHEMA,"provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI","parameters":plan["parameters"],
                   "parametersSha256":plan["parametersSha256"],"geometryIdentity":plan["geometryIdentity"],"geometryIdentitySha256":plan["geometryIdentitySha256"],
-                  "meshLevel":mesh_level,"meshSizeM":plan["meshSizeM"],"generatorSourceCommit":os.environ["GITHUB_SHA"],"generatorSourceFile":generator,
+                  "meshLevel":mesh_level,"meshSizeM":plan["meshSizeM"],"generatorSourceCommit":os.environ["GITHUB_SHA"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
                   "cadEvidenceSha256":sha256(encoded(cad)).hexdigest(),"limits":LIMITS,"files":[record(destination/name) for name in FILES],"mainApplicationWrites":False}
         with (destination/MANIFEST).open("xb") as stream:stream.write(encoded(manifest))
         report={"schemaVersion":SCHEMA,"createdAt":datetime.now(timezone.utc).isoformat(),"status":"AUTHORED_CAD_VOLUME_MESH_NATIVE_CHECKS_REQUIRED",
-                "provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI","generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,
+                "provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI","generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
                 "parametersSha256":plan["parametersSha256"],"geometryIdentitySha256":plan["geometryIdentitySha256"],"inputManifestSha256":sha256(encoded(manifest)).hexdigest(),
                 "parameters":plan["parameters"],"meshLevel":mesh_level,"limits":LIMITS,"gmshVersion":gmsh.__version__,"nativeCADConstructed":True,"volumeMeshGenerated":True,
                 "components":components,"commonInterfaceEvidence":interface,"cadEvidence":cad,"cadEvidenceSha256":manifest["cadEvidenceSha256"],"equationStages":plan["equationStages"],
@@ -375,6 +385,7 @@ def generate(parameters, output_directory, mesh_level="coarse"):
 
 
 def verify_output(directory):
+    import teaching_tetra_corner_refinement as corner
     root=Path(directory).absolute();require(root.is_dir() and {p.name for p in root.iterdir()}=={*FILES,REPORT,MANIFEST},"Retain only the exact authored CAD/mesh manifest inventory.")
     report=json_file(root/REPORT);manifest=json_file(root/MANIFEST);plan=teaching_plan(manifest.get("parameters"),manifest.get("meshLevel"))
     require(report.get("schemaVersion")==SCHEMA and manifest.get("schemaVersion")==MANIFEST_SCHEMA and report.get("provenance")==manifest.get("provenance")=="CLASSROOM_AUTHORED_GEOMETRY"
@@ -395,15 +406,27 @@ def verify_output(directory):
     generator={"path":"tools/teaching_pump_geometry.py","bytes":Path(__file__).stat().st_size,"sha256":sha256(Path(__file__).read_bytes()).hexdigest()}
     require(report.get("generatorSourceFile")==manifest.get("generatorSourceFile")==generator and report.get("generatorSourceCommit")==manifest.get("generatorSourceCommit")
             and isinstance(report.get("generatorSourceCommit"),str) and re.fullmatch(r"[0-9a-f]{40}",report["generatorSourceCommit"]),"The actual generator source bytes and public commit must remain bound.")
+    post_source=Path(__file__).with_name("teaching_tetra_corner_refinement.py")
+    processor={"path":"tools/teaching_tetra_corner_refinement.py","bytes":post_source.stat().st_size,"sha256":sha256(post_source.read_bytes()).hexdigest()}
+    require(report.get("meshPostProcessorSourceFile")==manifest.get("meshPostProcessorSourceFile")==processor,
+            "The actual conservative corner subdivision source bytes must remain bound.")
     expected=[record(root/name) for name in FILES];require(manifest.get("files")==expected,"Every actual BREP/component mesh must match its manifest bytes and SHA256.")
     require(sum(p.stat().st_size for p in root.iterdir())<=LIMITS["maximumWorkspaceBytes"],"Actual authored workspace exceeds512MiB.")
     rows=report.get("components",[]);require(isinstance(rows,list) and [r.get("component") for r in rows]==["impeller","volute"],"Both ordered authored fluid components are required.")
-    data={}
+    data={};original_nodes=set();threshold=None;next_node=None
     for row in rows:
         name=row["component"];data[name]=parse_msh(name,read_regular(root/(name+".msh"),LIMITS["maximumFileBytes"]))
         require(all(row.get(k)==v for k,v in data[name]["metrics"].items()) and row.get("generatedFile")=={**record(root/(name+".msh")),"format":"gmsh-msh2.2-ascii"}
                 and row.get("cellZone")==("rotating-fluid" if name=="impeller" else "stationary-fluid"),"Actual published component topology/metrics changed after native generation.")
         volume=number(row.get("cadFluidVolumeM3"));require(volume>0 and row.get("cadMeshRelativeVolumeDifference")==abs(volume-row["totalCellVolumeM3"])/volume<=.005,"The actual CAD/mesh volume check must remain bound.")
+        evidence=row.get("cornerSubdivisionEvidence")
+        require(isinstance(evidence,dict),"Declared boundary corner subdivision evidence is required.")
+        if threshold is None:
+            threshold=evidence.get("originalGlobalMaximumNodeLabel");next_node=threshold+1 if type(threshold) is int else None
+        require(evidence.get("originalGlobalMaximumNodeLabel")==threshold and evidence.get("firstInsertedNodeLabel")==next_node,
+                "Both component centroid label intervals must follow the same actual original fluid node domain.")
+        original,next_node=corner.replay_component(data[name],evidence);original_nodes.update(original["points"])
+    require(original_nodes and max(original_nodes)==threshold,"The retained original global node threshold must reproduce from both actual fluid components.")
     require(sum(row["cellCount"] for row in rows)<=LIMITS["maximumCombinedCells"] and sum(row["nodeCount"] for row in rows)<=LIMITS["maximumCombinedNodes"],"Actual combined cells/nodes exceed the fixed authored mesh bound.")
     surface_ids=report.get("cadEvidence",{}).get("commonInterfaceSurfaceIds")
     require(isinstance(surface_ids,list) and surface_ids and all(type(v) is int and v>0 for v in surface_ids),"Shared native CAD surface entity identities are required.")

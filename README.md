@@ -762,3 +762,20 @@ study. Cavitation, NPSHr, transient, restart, mesh/time convergence and physical
 validation require their own actual runs and evidence. This authored teaching
 lane cannot validate the original pump geometry or manufacturer performance.
 Main source, engineering locks, database, deployment and local ports are unchanged.
+
+The first actual authored CAD trial
+[38185856839](https://github.com/simcalc/PyAnsys/actions/runs/38185856839)
+generated **200,028 tetrahedra**. The impeller's volume, concavity, skewness
+and non-orthogonality checks passed, but **919 cells** failed the unchanged
+determinant check. The native `underdeterminedCells` and
+`twoInternalFacesCells` sets contain exactly the same 919 cells. Stator, NCC
+and flow execution were correctly withheld by this component quality gate.
+
+The next declared mesh operation inserts an interior centroid only in an
+authored tetrahedron having two or more exterior boundary faces. Its four
+positive child tetrahedra conserve the parent volume and preserve every
+original point, exterior triangle and physical role. Both interface exports
+therefore remain exact. Published topology is independently reconstructed
+and replayed, with the postprocessor source bytes bound in the manifest.
+This operation is not a native-quality acceptance: full component and merged
+mesh checks and the original NCC coverage criteria still have to pass.
