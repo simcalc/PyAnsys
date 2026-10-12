@@ -1053,10 +1053,25 @@ The original 0.99/0.999/1.01 coverage criteria remain in force.
 
 A separate pure audit checks finite SI endpoint fields and complete stored
 checkpoint roles: scientific fields, flux state, moved points, actual
-`<time>/fvMesh/polyFaces` and the native adaptive clock. Quarter-period writes
+`<time>/fvMesh/polyFaces` and the native clock. Quarter-period writes
 do not provide the preceding native-step geometry for an ALE conservation or
 moving-wall flux proof. Missing data stays explicitly pending and does not
 erase valid independent coordinate evidence. A complete stored checkpoint is
 not an executed matched restart. This pilot and its contract tests do not
 qualify transient performance, sliding H0, NPSH3, wall resolution, mesh/time
 convergence, physical validation or restart.
+
+The separate `teaching_pump_restart_clock.py` reader prepares the seeded clock
+part of a future restart comparison. It reads all six actual `uniform/time`
+keys, the complete current checkpoint inventory, immutable controls, the
+pinned native Build and selected solver, the resumed log and the endpoint
+clock. Native time and index continue from their stored values. Fixed time
+steps may omit `deltaT` log lines; adaptive steps must retain their actual
+printed increments. The reader follows Foundation 12's distinct fixed and
+adaptive restoration rules and preserves absolute global time.
+
+Its 18 focused tests and independent source review verify these reader
+contracts. Header/inventory completeness and clock consistency do not prove
+field-state equivalence, physical motion, ALE conservation or a matched
+restart. This helper starts no native process and cannot accept those research
+claims. An actual paired continuous/resumed solve remains required.
