@@ -1259,3 +1259,20 @@ global pressure-above-vapour criteria stay unchanged. This exploratory trial
 must qualify independently. A subsequent **active-cavitation** run at the
 same pressure is required to establish H0; single-phase head is not H0, and
 this new profile cannot enter the older 300 kPa phase adapter implicitly.
+
+### Extended outlet domain investigation
+
+The separate manual `teaching-pump-free-extended-outlet.yml` trial changes only
+the authored outlet length from 0.15 to 0.30 m. It requires fresh CAD, native
+every-cell quality and coupled-interface evidence before a fresh 1 MPa,
+2000-iteration SST/MRF solve. All physics input bytes, flow, RPM, fluid,
+numerical controls, resource bounds and numerical acceptance limits remain
+unchanged from the reviewed high-pressure family.
+
+The measured reason is documented in
+[the extended outlet trial](docs/teaching_pump_extended_outlet_trial.md).
+The previous run completed native execution but failed numerical acceptance;
+its reverse flux was localized at the inner outlet edge. This new geometry
+does not inherit that execution or predict convergence. Its reported head is
+the **extended assembly head**, including extra duct losses, with no pump-only
+head correction. It does not qualify a pressure sweep, NPSHr or transient.

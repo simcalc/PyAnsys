@@ -1,0 +1,153 @@
+{
+  "equationStages": {
+    "reverseFlow": {
+      "equation": "reverse_fraction = sum(max(-phi_f,0)) / sum(abs(phi_f))",
+      "input": {
+        "sumAbsolutePhiM3S": 0.09734215079937987,
+        "sumNegativePhiMagnitudeM3S": 0.003589928425662387
+      },
+      "result": 0.03687948536355185,
+      "substitution": "0.003589928425662387/0.09734215079937987",
+      "unit": "1"
+    },
+    "rotatingWall": {
+      "equation": "U_wall_absolute = omega_vector cross (face_centroid - origin)",
+      "input": {
+        "axis": [
+          0,
+          0,
+          1
+        ],
+        "omegaRadS": 151.84364492350667,
+        "originM": [
+          0,
+          0,
+          0
+        ]
+      },
+      "result": {
+        "blade": {
+          "faceCount": 1614,
+          "maximumAbsNativeRelativePhiM3S": 0.0,
+          "maximumVelocityErrorMS": 7.119291619286993e-15,
+          "maximumWallSpeedMS": 19.923296482376365
+        },
+        "impeller-hub": {
+          "faceCount": 1689,
+          "maximumAbsNativeRelativePhiM3S": 0.0,
+          "maximumVelocityErrorMS": 7.32410687763558e-15,
+          "maximumWallSpeedMS": 21.05658525049221
+        },
+        "impeller-shroud": {
+          "faceCount": 1716,
+          "maximumAbsNativeRelativePhiM3S": 0.0,
+          "maximumVelocityErrorMS": 7.160723346098895e-15,
+          "maximumWallSpeedMS": 21.03474528388939
+        }
+      },
+      "substitution": "(0,0,151.84364492350665) cross (x_f,y_f,z_f)",
+      "unit": "m/s"
+    }
+  },
+  "mainApplicationWrites": false,
+  "mesh": {
+    "cellCount": 47651,
+    "faceCount": 103553,
+    "internalFaceCount": 87051,
+    "pointCount": 12751
+  },
+  "nativeIteration": 2000,
+  "npshrCalculated": false,
+  "numericalBaselineQualified": false,
+  "outlet": {
+    "areaM2": 0.0047993,
+    "faceCount": 144,
+    "fluxNormalVelocityMSRange": [
+      -10.527319198021939,
+      30.870902783266935
+    ],
+    "fluxVersusStoredVelocityMaximumDifferenceMS": 0.5209620150844803,
+    "inletDeclaredFluxMagnitudeM3S": 0.09016229212582648,
+    "negativeFaceCount": 21,
+    "normal": [
+      0,
+      1,
+      0
+    ],
+    "normalVelocityMSRange": [
+      -10.565523144565315,
+      30.870385889737147
+    ],
+    "patch": "mass-flow-inlet-11",
+    "reverseAreaFraction": 0.13722248734020165,
+    "signedFluxM3S": 0.09016229394805508,
+    "xSpatialDistribution": [
+      {
+        "areaM2": 0.000899217709250909,
+        "faceCount": 28,
+        "negativePhiMagnitudeM3S": 0.003589928425662387,
+        "signedPhiM3S": -0.003064623215834368,
+        "xIntervalM": [
+          0.15050000000000002,
+          0.17250000000000001
+        ]
+      },
+      {
+        "areaM2": 0.00101265798285833,
+        "faceCount": 29,
+        "negativePhiMagnitudeM3S": -0.0,
+        "signedPhiM3S": 0.012157981290722066,
+        "xIntervalM": [
+          0.17250000000000001,
+          0.1945
+        ]
+      },
+      {
+        "areaM2": 0.0009956203317325375,
+        "faceCount": 30,
+        "negativePhiMagnitudeM3S": -0.0,
+        "signedPhiM3S": 0.02444436248367919,
+        "xIntervalM": [
+          0.1945,
+          0.21650000000000003
+        ]
+      },
+      {
+        "areaM2": 0.0009837401390082145,
+        "faceCount": 29,
+        "negativePhiMagnitudeM3S": -0.0,
+        "signedPhiM3S": 0.028888399434942043,
+        "xIntervalM": [
+          0.21650000000000003,
+          0.23850000000000002
+        ]
+      },
+      {
+        "areaM2": 0.0009080638371500088,
+        "faceCount": 28,
+        "negativePhiMagnitudeM3S": -0.0,
+        "signedPhiM3S": 0.027736173954546164,
+        "xIntervalM": [
+          0.23850000000000002,
+          0.2605
+        ]
+      }
+    ],
+    "yLocationM": 0.15
+  },
+  "physicalTransientQualified": false,
+  "role": "Final native field diagnostics only; not a stationarity or convergence acceptance.",
+  "schemaVersion": "untirta.teaching-pump-retained-face-diagnostics.v1",
+  "source": {
+    "allCurrentMemberBytesShaVerified": true,
+    "archiveBytes": 17397855,
+    "archiveSha256": "f2fde61126c567b18211aacf36e56d3cc6f8f85073758f1679d0253697601234",
+    "artifactId": 11732905260,
+    "artifactName": "authored-teaching-pump-high-pressure-38215415105",
+    "memberCount": 168,
+    "runConclusion": "failure",
+    "runId": "38215415105",
+    "sourceCommit": "34de429eecc41502c3022089d2ed0e7bf35c06b0",
+    "wholeArchiveShaVerified": true
+  }
+}
