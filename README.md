@@ -1226,3 +1226,36 @@ residual up to 0.007309, and reconstructed minimum absolute pressure about
 study. Completing 500 iterations or correcting a file reader does not qualify
 these numerical or single-phase results. No active-phase H0, NPSHr/NPSH3,
 physical transient, refinement or matched restart is obtained from this run.
+
+### Fresh bounded high-pressure convergence trial
+
+`teaching-pump-free-high-pressure.yml` is a separate manual FREE standard-runner
+workflow. Its immutable typed research profile declares 2000 steady iterations,
+1000000 Pa absolute outlet reference, and a final 20-iteration window from
+1981 through 2000. The previous 300000 Pa/500-iteration adapter and its
+historical records stay distinct. New recipe, preparation, execution, runtime,
+study, input-manifest and acceptance filenames bind this new profile.
+
+The whole reviewed previous recipe inventory is checked before changing only
+`controlDict.endTime`, `writeInterval`, and the master total-pressure function's
+`pRef`. All physical boundary fields, prescribed 90 kg/s flow, 1450 rpm, SST,
+MRF, walls, schemes and solution coupling remain unchanged. Kinematic outlet
+pressure remains zero. Both reconstruction and total-pressure sampling add
+the declared 1 MPa absolute reference exactly once; `staticPressurePa` remains
+gauge Pa. This changes the high-pressure physical reference condition and
+cannot improve head, velocity or nonlinear convergence by itself.
+
+The preceding 500-iteration history was still decaying. Its native solver
+required about 150 seconds and a 616377-byte log. Scaling that measured cost
+suggests a finite 2000-iteration investigation within the existing 1200-second,
+one-CPU, four-GiB, one-GiB workspace and four-MiB log limits; actual limits are
+enforced, and no runtime or convergence result is promised. Fresh fields start
+at iteration zero; no rejected field or restart state is reused.
+
+The independent new reducer reads the actual endpoint at 2000, all final 20
+sample rows, complete source inventories and current external native binary
+bytes. Residual, positive-head, head-span, flow/backflow, continuity, NCC and
+global pressure-above-vapour criteria stay unchanged. This exploratory trial
+must qualify independently. A subsequent **active-cavitation** run at the
+same pressure is required to establish H0; single-phase head is not H0, and
+this new profile cannot enter the older 300 kPa phase adapter implicitly.
