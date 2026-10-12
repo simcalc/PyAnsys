@@ -1208,3 +1208,21 @@ role keys, or those same keys with explicit version `2.0`; duplicate, extra,
 wrong-role and wrong-version keys remain rejected. The ten retained native
 initial fields replay with unchanged byte/SHA records. This correction does
 not establish solver convergence or change any numerical acceptance limit.
+
+The next native job, run `38210983836`, reached `End` at iteration 500. Its
+final inventory reader then rejected two genuine native roles: the initial
+`staticPressurePa` function result and `0/uniform/time`. Both now have bounded,
+complete typed readers, tied to the actual authored control and native
+producer. Static pressure from `calcTotal no` is **gauge Pa**; the absolute
+outlet reference is not added to that field. The initial six-key zero clock
+is data only and establishes neither physical integration nor restart.
+All 65 focused inlet-flow contracts pass. A read-only replay checks seven
+retained native data roles without changing the rejected historical report.
+
+That completed solver history is still unqualified. The last 20 iterations
+have mean head about -0.400 m, relative head span 50.502%, pressure initial
+residual up to 0.007309, and reconstructed minimum absolute pressure about
+-484944 Pa. The flow equations use 9.81 m/s2 as explicitly declared in this
+study. Completing 500 iterations or correcting a file reader does not qualify
+these numerical or single-phase results. No active-phase H0, NPSHr/NPSH3,
+physical transient, refinement or matched restart is obtained from this run.

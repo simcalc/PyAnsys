@@ -39,7 +39,9 @@ FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 NCC_PATCHES = {"pumpInterface_on_interface-impeller-outlet", "pumpInterface_on_interface-volute-inlet",
     "nonConformalError_on_interface-impeller-outlet", "nonConformalError_on_interface-volute-inlet"}
 STARTUP_FIELDS = {"totalPressurePa":("totalPressurePa","pressure","p"),
+    "staticPressurePa":("gaugeStaticPressurePa","pressure","p"),
     "U2":("absoluteVelocitySquared","magSqr","U"),"yPlus":("wallYPlus","yPlus",None)}
+NATIVE_SOURCE = "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/"
 
 
 class InletFlowCaseIssue(ValueError): pass
@@ -246,6 +248,67 @@ def verify_fields_after_ncc(root, authored):
                 "Only exact NCC constraint fields may be introduced.")
 
 
+def native_zero_time(raw, expected_delta_t):
+    """Typed initial TimeIO data only; caller must bind its control and producer."""
+    import teaching_pump_restart_clock as parser
+    require(type(expected_delta_t) in (int,float) and math.isfinite(expected_delta_t) and expected_delta_t>0,
+        "A zero-clock proof needs an explicit finite positive authored initial step.")
+    text=parser.data_text(raw);header=re.match(r"\s*FoamFile\s*\{([^{}]*)\}",text)
+    require(header,"The initial clock requires its one native dictionary header.")
+    h=parser.entries(header[1]);wanted={"format":["ascii"],"class":["dictionary"],"location":['"0/uniform"'],"object":["time"]}
+    require(h==wanted or h=={"version":["2.0"],**wanted},"Initial clock class/location/object/ASCII keys must remain exact.")
+    values=parser.entries(text[header.end():])
+    require(set(values)=={"beginTime","value","name","index","deltaT","deltaT0"}
+        and values["name"]==['"0"'] and values["index"]==["0"]
+        and parser.scalar(values,"beginTime")==parser.scalar(values,"value")==0
+        and parser.scalar(values,"deltaT")==parser.scalar(values,"deltaT0")==expected_delta_t,
+        "The exact six native initial clock keys must match zero start and the authored initial step.")
+    return {"nativeRole":"derived-initial-clock-state","name":"0","index":0,"beginTime":0,"value":0,
+        "deltaT":float(expected_delta_t),"deltaT0":float(expected_delta_t),"dataOnlyVerified":True,"authoredInput":False,
+        "iterationIndexIsPhysicalTime":False,"physicalTimeIntegrationVerified":False,"restartVerified":False,
+        "sourceUrl":NATIVE_SOURCE+"src/OpenFOAM/db/Time/TimeIO.C#L205"}
+
+
+def native_static_pressure(raw,cells,patches,*,ncc_counts=None):
+    """Exact gauge-Pa result, with no pressure-reference addition or source alias."""
+    import teaching_pump_restart_clock as parser
+    text=parser.data_text(raw)
+    match=re.fullmatch(r"\s*FoamFile\s*\{([^{}]*)\}\s*dimensions\s*\[\s*1\s+-1\s+-2\s+0\s+0\s+0\s+0\s*\]\s*;\s*internalField\s+(.+?)\s*;\s*boundaryField\s*\{(.*)\}\s*",text,re.S)
+    require(match,"The generated static pressure needs complete native scalar data and exact Pa dimensions.")
+    header=parser.entries(match[1]);wanted={"format":["ascii"],"class":["volScalarField"],"location":['"0"'],"object":["staticPressurePa"]}
+    require(header==wanted or header=={"version":["2.0"],**wanted},"Generated gauge pressure native header must retain its exact role.")
+    def scalar_values(source,count):
+        value=re.fullmatch(r"\s*(?:uniform\s+("+FLOAT+r")|nonuniform\s+List<scalar>\s+(\d+)\s*\(([^()]*)\))\s*",source,re.S)
+        require(value,"Generated gauge pressure values must be plain finite scalars.")
+        tokens=[value[1]] if value[1] is not None else value[3].split()
+        require(value[1] is not None or len(tokens)==int(value[2])==count,"Each full gauge pressure value list must cover its current native cells/faces.")
+        require(len(tokens)<=1000000 and all(re.fullmatch(FLOAT,v) and math.isfinite(float(v)) for v in tokens),"Every gauge-pressure scalar must be finite and bounded.")
+        return [float(v) for v in tokens]
+    values=scalar_values(match[2],cells);require(values and min(values)==max(values)==0,"Current fresh p=0 initial state requires zero internal gauge-Pa output.")
+    blocks=list(re.finditer(r'"?([A-Za-z0-9_-]+)"?\s*\{([^{}]*)\}',match[3]))
+    require(len(blocks)==len(patches) and len({b[1] for b in blocks})==len(blocks) and {b[1] for b in blocks}==set(patches)
+        and not re.sub(r'"?[A-Za-z0-9_-]+"?\s*\{[^{}]*\}',"",match[3]).strip(),"Generated gauge pressure must cover every actual native patch exactly once.")
+    count=0;allowed={"calculated","extrapolatedCalculated","zeroGradient","fixedValue","nonConformalCyclic","nonConformalError","nonConformalCalculated"}
+    for block in blocks:
+        entries=parser.entries(block[2]);kind=entries.pop("type",None)
+        require(kind is not None and len(kind)==1 and kind[0] in allowed,"Only known non-executable gauge-pressure patch roles are supported.")
+        if kind[0].startswith("nonConformal"):
+            require(block[1] in NCC_PATCHES and (kind[0]=="nonConformalCalculated" or kind[0]==patches[block[1]]["type"]),"Gauge-pressure NCC constraints must match their actual native patch role.")
+        override=entries.pop("patchType",None);require(override is None or override==[patches[block[1]]["type"]],"Any native gauge-pressure patch override must match the mesh.")
+        if not entries:
+            require(kind[0] in {"zeroGradient","nonConformalCyclic","nonConformalError"},"Calculated gauge-pressure patches must store their values.");continue
+        require(set(entries)=={"value"},"Gauge-pressure patch dictionaries cannot contain code or unknown keys.")
+        expected=patches[block[1]]["nFaces"]
+        if block[1] in NCC_PATCHES and entries["value"][0]=="nonuniform":
+            require(isinstance(ncc_counts,dict) and block[1] in ncc_counts,"Gauge-pressure nonuniform NCC values need current native cache face counts.")
+            expected=ncc_counts[block[1]]
+        count+=len(scalar_values(" ".join(entries["value"]),expected))
+    return {"dimensions":"1 -1 -2 0 0 0 0","allInternalCellsRepresented":cells,"storedInternalScalarCount":len(values),
+        "internalMinimum":min(values),"internalMaximum":max(values),"nativePatchCount":len(blocks),"storedBoundaryScalarCount":count,
+        "allStoredValuesFinite":True,"allNativePatchRolesChecked":True,"pressureBasis":"gauge-Pa","referenceAdditionPa":0,
+        "equation":"staticPressurePa=rhoInf*p_kinematic; calcTotal=false does not add pRef", "sourceUrl":NATIVE_SOURCE+"src/functionObjects/field/pressure/pressure.C#L61"}
+
+
 def generated_data(directory, *, after_native_execution=False):
     """Read only known native data; never call the phase admission/constructor.
 
@@ -274,11 +337,13 @@ def generated_data(directory, *, after_native_execution=False):
                 if folder=="0":
                     present={n for n in {*STARTUP_FIELDS,"cellToRegion"} if (path/n).exists() or (path/n).is_symlink()}
                     expected|=present
+                    if (path/"uniform").exists() or (path/"uniform").is_symlink():expected.add("uniform")
             entries=list(path.iterdir());require(len(entries)<=64 and {p.name for p in entries}==expected,
                 "Unknown or prefilled initial data/native dictionary roles are prohibited.")
             for entry in entries:
                 require(not entry.is_symlink() and not getattr(entry,"is_junction",lambda:False)()
-                    and (entry.is_dir() if folder=="constant" and entry.name in {"polyMesh","fvMesh"} else entry.is_file()),
+                    and (entry.is_dir() if folder=="constant" and entry.name in {"polyMesh","fvMesh"}
+                        or component=="impeller-case" and after_native_execution and folder=="0" and entry.name=="uniform" else entry.is_file()),
                     "Keep every initial/control path an exact ordinary native role.")
     rows=[];proofs=[];bound={};ncc_counts=None
     def read(relative,limit=MAX_FILE):
@@ -319,7 +384,7 @@ def generated_data(directory, *, after_native_execution=False):
         text=control.decode("ascii")
         for name in startup:
             raw,row=read("impeller-case/0/"+name)
-            proof=data.startup_scalar_field(raw,name,cells,patches,ncc_counts=ncc_counts)
+            proof=native_static_pressure(raw,cells,patches,ncc_counts=ncc_counts) if name=="staticPressurePa" else data.startup_scalar_field(raw,name,cells,patches,ncc_counts=ncc_counts)
             function,kind,field=STARTUP_FIELDS[name]
             blocks=re.findall(r"(?m)^"+re.escape(function)+r"\s*\{([^{}]*)\}",text)
             require(len(blocks)==1 and re.findall(r"\btype\s+(\w+)\s*;",blocks[0])==[kind],"Generated data binds its exact authored function name/type.")
@@ -331,11 +396,34 @@ def generated_data(directory, *, after_native_execution=False):
                     and re.findall(r"\brhoInf\s+([^;{}]+);",blocks[0])==["998.2"]
                     and re.findall(r"\bpRef\s+([^;{}]+);",blocks[0])==["300000"],
                     "Single-phase total pressure maps rhoInf*p plus outlet-static300000Pa exactly once, not absolute phase p.")
+            if name=="staticPressurePa":
+                require(re.findall(r"\bcalcTotal\s+(\w+)\s*;",blocks[0])==["no"]
+                    and re.findall(r"\bcalcCoeff\s+(\w+)\s*;",blocks[0])==["no"]
+                    and re.findall(r"\brho\s+(\w+)\s*;",blocks[0])==["rhoInf"]
+                    and re.findall(r"\brhoInf\s+([^;{}]+);",blocks[0])==["998.2"] and not re.search(r"\bpRef\b",blocks[0]),
+                    "Static pressure is the exact gauge-Pa function result, with no absolute reference addition.")
+                pressure,pressure_row=read("impeller-case/0/p");prefix,_=fields.boundary_blocks(pressure,"p")
+                require(re.findall(r"\bdimensions\s+([^;{}]+);",prefix)==["[0 2 -2 0 0 0 0]"]
+                    and re.findall(r"\binternalField\s+([^;{}]+);",prefix)==["uniform 0"],"Generated gauge-Pa output must bind the actual fresh zero kinematic-p initial state.")
+                proof["sourceInitialPressureFile"]=pressure_row
             proof.update(path=row["path"],nativeRole="derived-startup-volScalarField",dataOnlyVerified=True,authoredInput=False,
                 sourceFunctionObject=function,sourceFunctionType=kind,resultField=name,sourceControlFile=control_row,
-                numericalAcceptanceInherited=False,sourceUrl=data.STARTUP_FIELD_SOURCE,
+                numericalAcceptanceInherited=False,sourceUrl=proof.get("sourceUrl",data.STARTUP_FIELD_SOURCE),
                 pressureReferenceLocation="outlet" if name=="totalPressurePa" else None)
             rows.append(row);proofs.append(proof)
+    zero_clock=root/"impeller-case/0/uniform"
+    if zero_clock.exists() or zero_clock.is_symlink():
+        require(after_native_execution and {p.name for p in base.regular_directory(zero_clock).iterdir()}=={"time"},"Only the exact postnative initial clock file may occur under0/uniform.")
+        raw,row=read("impeller-case/0/uniform/time",MAX_REPORT);control,control_row=read("impeller-case/system/controlDict")
+        require(control==authored["impeller-case/system/controlDict"],"The initial clock must bind the unchanged trusted control dictionary.")
+        text=control.decode("ascii")
+        require(re.findall(r"\bstartFrom\s+([^;{}]+);",text)==["startTime"] and re.findall(r"\bstartTime\s+([^;{}]+);",text)==["0"]
+            and re.findall(r"\bdeltaT\s+([^;{}]+);",text)==["1"] and not re.search(r"\buserTime\b|\badjustTimeStep\s+yes\s*;",text),"This initial clock is a fixed steady iteration clock, not adaptive physical time or restart.")
+        log,solver_row=read("logs/03-foamRun.log",LIMITS["maximumLogBytes"]);log_text=log.decode("utf-8")
+        geometry.completed_log(log_text)
+        require(re.findall(r"(?m)^Selecting solver (\w+)\s*$",log_text)==["incompressibleFluid"],"The initial clock data needs the actual completed pinned single-phase solver producer.")
+        proof=native_zero_time(raw,1);proof.update(path=row["path"],sourceControlFile=control_row,sourceSolverLog=solver_row,numericalAcceptanceInherited=False)
+        rows.append(row);proofs.append(proof)
     require(all(record(root,path,limit=LIMITS["maximumLogBytes"] if path.startswith("logs/") else MAX_FILE)[1]==row
         for path,row in bound.items()),"Native data or generating mesh/control/log bytes changed during inspection.")
     paired=sorted(zip(rows,proofs),key=lambda pair:pair[0]["path"])

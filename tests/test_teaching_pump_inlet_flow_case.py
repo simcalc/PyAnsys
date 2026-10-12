@@ -283,6 +283,7 @@ class TeachingInletFlowCaseTests(unittest.TestCase):
 
     def test_unknown_initial_control_and_cache_roles_cannot_be_prefilled(self):
         for role in ("impeller-case/0/totalPressurePa","impeller-case/0/cellToRegion","impeller-case/0/unbound",
+                "impeller-case/0/staticPressurePa","impeller-case/0/uniform/time",
                 "impeller-case/system/newFunction","impeller-case/constant/fvConstraints","impeller-case/constant/fvMesh/other"):
             with self.subTest(role=role),tempfile.TemporaryDirectory() as temp:
                 root=Path(temp)
@@ -299,15 +300,77 @@ class TeachingInletFlowCaseTests(unittest.TestCase):
                 output=root/"flow";case.prepare(source,output)
                 for name in case.MESH_FILES:shutil.copyfile(source/"impeller-case/constant/polyMesh"/name,output/"impeller-case/constant/polyMesh"/name)
                 patches=case.geometry.boundary_entries(output/"impeller-case/constant/polyMesh/boundary")
-                for name in case.STARTUP_FIELDS:(output/"impeller-case/0"/name).write_bytes(startup_field(name,patches,dimensions="" if name=="yPlus" else None))
+                for name in case.STARTUP_FIELDS:
+                    raw=startup_field("totalPressurePa" if name=="staticPressurePa" else name,patches,dimensions="" if name=="yPlus" else None)
+                    if name=="staticPressurePa":raw=raw.replace(b"object totalPressurePa;",b"object staticPressurePa;")
+                    (output/"impeller-case/0"/name).write_bytes(raw)
                 rows,proof=case.generated_data(output,after_native_execution=True)
-                self.assertEqual([r["path"] for r in rows],["impeller-case/0/U2","impeller-case/0/totalPressurePa","impeller-case/0/yPlus"])
+                self.assertEqual([r["path"] for r in rows],["impeller-case/0/U2","impeller-case/0/staticPressurePa","impeller-case/0/totalPressurePa","impeller-case/0/yPlus"])
                 self.assertTrue(all(p["dataOnlyVerified"] and not p["authoredInput"] and not p["numericalAcceptanceInherited"] for p in proof))
                 total=next(p for p in proof if p["resultField"]=="totalPressurePa")
                 self.assertEqual(total["pressureReferenceLocation"],"outlet")
                 self.assertEqual(total["allInternalCellsRepresented"],12)
+                static=next(p for p in proof if p["resultField"]=="staticPressurePa")
+                self.assertEqual(static["pressureBasis"],"gauge-Pa");self.assertEqual(static["referenceAdditionPa"],0)
+                self.assertEqual(static["sourceInitialPressureFile"],case.record(output,"impeller-case/0/p")[1])
                 control=output/"impeller-case/system/controlDict";control.write_bytes(control.read_bytes().replace(b"pRef 300000;",b"pRef 0;"))
                 with self.assertRaisesRegex(case.InletFlowCaseIssue,"exact trusted"):case.generated_data(output,after_native_execution=True)
+
+    def test_static_startup_shape_units_and_source_initial_state_cannot_be_relabelled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            with self.fixture(root) as source:
+                output=root/"flow";case.prepare(source,output)
+                for name in case.MESH_FILES:shutil.copyfile(source/"impeller-case/constant/polyMesh"/name,output/"impeller-case/constant/polyMesh"/name)
+                patches=case.geometry.boundary_entries(output/"impeller-case/constant/polyMesh/boundary")
+                raw=startup_field("totalPressurePa",patches).replace(b"object totalPressurePa;",b"object staticPressurePa;")
+                path=output/"impeller-case/0/staticPressurePa"
+                for before,after in ((b"[1 -1 -2 0 0 0 0]",b"[0 2 -2 0 0 0 0]"),
+                    (b"object staticPressurePa;",b"object totalPressurePa;"),
+                    (b"internalField uniform 0;",b"internalField uniform 300000;"),
+                    (b"internalField uniform 0;",b"internalField nonuniform List<scalar> 2(0 0);"),
+                    (b"type calculated;",b"type codedFixedValue;")):
+                    with self.subTest(after=after):
+                        self.assertIn(before,raw);path.write_bytes(raw.replace(before,after))
+                        with self.assertRaises(ValueError):case.generated_data(output,after_native_execution=True)
+                path.write_bytes(raw)
+                initial=output/"impeller-case/0/p";original=initial.read_bytes();initial.write_bytes(original.replace(b"internalField uniform 0;",b"internalField uniform 1;"))
+                with self.assertRaisesRegex(case.InletFlowCaseIssue,"fresh zero"):case.generated_data(output,after_native_execution=True)
+
+    def test_zero_time_pure_state_is_exact_typed_and_not_restart_or_physical_clock(self):
+        def raw(dt=1):return (case.base.foam_header("time","dictionary","0/uniform")+f'beginTime 0; value 0; name "0"; index 0; deltaT {dt}; deltaT0 {dt};\n').encode()
+        for dt in (1,.00011494252873563218):
+            proof=case.native_zero_time(raw(dt),dt)
+            self.assertEqual(proof["deltaT"],dt)
+            for key in ("authoredInput","iterationIndexIsPhysicalTime","physicalTimeIntegrationVerified","restartVerified"):self.assertIs(proof[key],False)
+        for before,after in ((b'location "0/uniform";',b'location "500/uniform";'),
+            (b"class dictionary;",b"class volScalarField;"),(b"index 0;",b"index 0; index 0;"),
+            (b"value 0;",b"value 1;"),(b"beginTime 0;",b"beginTime 1;"),(b'name "0";',b'name "0.0";'),
+            (b"deltaT 1;",b"deltaT 2;"),(b"deltaT0 1;",b"deltaT0 2;"),(b"index 0;",b"index 0; hidden yes;"),
+            (b"index 0;",b"index 0; #include secret;")):
+            with self.subTest(after=after),self.assertRaises(ValueError):case.native_zero_time(raw().replace(before,after),1)
+        with self.assertRaises(ValueError):case.native_zero_time(raw(),True)
+
+    def test_initial_clock_is_postnative_only_current_control_log_and_exact_uniform_role(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            with self.fixture(root) as source:
+                output=root/"flow";case.prepare(source,output);folder=output/"impeller-case/0/uniform";folder.mkdir()
+                path=folder/"time";raw=(case.base.foam_header("time","dictionary","0/uniform")+'beginTime 0; value 0; name "0"; index 0; deltaT 1; deltaT0 1;\n').encode();path.write_bytes(raw)
+                (output/"logs").mkdir();log=output/"logs/03-foamRun.log"
+                log.write_bytes(b"Build : 12-86e126a7bc4d\nSelecting solver incompressibleFluid\nTime = 1s\nEnd\n")
+                with self.assertRaises(ValueError):case.generated_data(output)
+                rows,proofs=case.generated_data(output,after_native_execution=True)
+                self.assertEqual(rows,[case.record(output,"impeller-case/0/uniform/time")[1]])
+                self.assertEqual(proofs[0]["sourceSolverLog"],case.record(output,"logs/03-foamRun.log")[1])
+                self.assertFalse(proofs[0]["numericalAcceptanceInherited"]);self.assertFalse(proofs[0]["restartVerified"])
+                (folder/"unknown").write_bytes(b"unbound")
+                with self.assertRaises(ValueError):case.generated_data(output,after_native_execution=True)
+                (folder/"unknown").unlink();log.write_bytes(log.read_bytes().replace(b"incompressibleFluid",b"incompressibleVoF"))
+                with self.assertRaises(ValueError):case.generated_data(output,after_native_execution=True)
+                log.write_bytes(b"Build : 12-86e126a7bc4d\nSelecting solver incompressibleFluid\nTime = 1s\nEnd\n")
+                control=output/"impeller-case/system/controlDict";control.write_bytes(control.read_bytes().replace(b"deltaT 1;",b"deltaT 2;"))
+                with self.assertRaises(ValueError):case.generated_data(output,after_native_execution=True)
 
     def test_native_region_data_complete_connectivity_log_and_rawbytes_replayed(self):
         with tempfile.TemporaryDirectory() as temp:
