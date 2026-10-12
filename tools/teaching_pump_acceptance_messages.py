@@ -16,7 +16,7 @@ def describe(result):
     observation=mapping(result.get('nativeObservation'));quality=mapping(observation.get('quality'))
     acceptance=mapping(mapping(result.get('study')).get('acceptance'))
     stages=mapping(result.get('stages'));head=mapping(mapping(stages.get('head')).get('result')).get('value')
-    residuals=mapping(quality.get('residuals'));head_history=quality.get('headHistoryM')
+    residuals=mapping(quality.get('finalResidualHistory'));head_history=quality.get('headHistoryM')
     span=None
     if isinstance(head_history,list) and head_history and all(finite(v) for v in head_history):
         mean=sum(head_history)/len(head_history)

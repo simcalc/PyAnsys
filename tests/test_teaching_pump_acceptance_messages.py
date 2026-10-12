@@ -14,7 +14,7 @@ def fixture():
         'study':{'acceptance':{'reverseFlowFractionLimit':.005,'headWindowRelativeLimit':.005,'residualLimit':.0001}},
         'nativeObservation':{'physicalBasis':{'headMeasurement':'inlet-to-extended-outlet-assembly'},
             'quality':{'reverseFlowFraction':.01645109349502972,'headHistoryM':[-1.05,-1.08],
-                'residuals':{'p':[.002154188437698948],'U':[4e-5],'k':[5e-5],'omega':[3e-5]}}}}
+                'finalResidualHistory':{'p':[.002154188437698948],'U':[4e-5],'k':[5e-5],'omega':[3e-5]}}}}
 
 class AcceptanceMessageTests(unittest.TestCase):
     def test_numeric_rejection_is_explained_and_original_flags_never_changed(self):
@@ -30,7 +30,7 @@ class AcceptanceMessageTests(unittest.TestCase):
     def test_equal_limits_pass_but_zero_head_and_missing_arrays_do_not(self):
         self.assertTrue(messages.criterion('residual',.0001,.0001,'<=','1')['criterionSatisfied'])
         self.assertFalse(messages.criterion('head',0.,0.,'>','m')['criterionSatisfied'])
-        source=fixture();source['nativeObservation']['quality']['residuals']['p']=[]
+        source=fixture();source['nativeObservation']['quality']['finalResidualHistory']['p']=[]
         out=messages.describe(source);self.assertFalse(out['criteria'][3]['evidenceAvailable'])
         self.assertFalse(out['criteria'][3]['criterionSatisfied'])
 
@@ -42,5 +42,14 @@ class AcceptanceMessageTests(unittest.TestCase):
         out=messages.describe(source);self.assertFalse(out['actualCfdRunVerified'])
         self.assertTrue(all(not c['criterionSatisfied'] for c in out['criteria']))
         self.assertNotIn('execution completed',out['explanation'])
+
+    def test_current_native_final_history_prints_maxima_and_rejects_wrong_alias(self):
+        source=fixture();quality=source['nativeObservation']['quality']
+        quality['finalResidualHistory']['p']=[.0018398167598813252,.002154188437698948,.001913626205656362]
+        out=messages.describe(source);row=out['criteria'][3]
+        self.assertTrue(row['evidenceAvailable']);self.assertEqual(row['actual'],.002154188437698948)
+        self.assertFalse(row['criterionSatisfied'])
+        quality['residuals']=quality.pop('finalResidualHistory')
+        out=messages.describe(source);self.assertTrue(all(not c['evidenceAvailable'] for c in out['criteria'][3:]))
 
 if __name__=='__main__':unittest.main()
