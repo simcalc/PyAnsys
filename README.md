@@ -1112,3 +1112,19 @@ contracts. Header/inventory completeness and clock consistency do not prove
 field-state equivalence, physical motion, ALE conservation or a matched
 restart. This helper starts no native process and cannot accept those research
 claims. An actual paired continuous/resumed solve remains required.
+
+### Smaller mesh candidates for bounded refinement research
+
+The geometry-only manual workflow additionally accepts `lean-coarse` (0.0095 m),
+`lean-medium` (0.0075 m) and `lean-fine` (0.0055 m). They retain the exact
+authored CAD and original native quality, boundary, interface and resource
+criteria. The old `coarse`, `medium`, `fine` choices and default remain unchanged;
+six prior canonical plan hashes are checked without recertifying historical
+native artifacts under a new generator source identity.
+
+The declared 50000–250000 cell range is a sizing target, not a measured count
+or an acceptance criterion. New actual cell counts and surface tessellations
+must be inspected after native generation. These choices supply no baseline,
+NPSH3, fixed discrete boundary, mesh convergence or transient qualification.
+The existing 500000-cell hard limit remains in force. The baseline and phase
+workflows do not automatically select these geometry-only candidates.

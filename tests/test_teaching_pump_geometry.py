@@ -42,10 +42,10 @@ def cubes():
     return result
 
 
-def retained_fixture(root):
+def retained_fixture(root,mesh_level="coarse"):
     """Exercise byte replay with explicit synthetic BREP; no OCC has executed."""
     root.mkdir()
-    data = cubes(); plan = geometry.teaching_plan(); components = []
+    data = cubes(); plan = geometry.teaching_plan(mesh_level=mesh_level); components = []
     threshold = max(n for item in data.values() for n in item['points']); next_node = threshold + 1
     for name, item in list(data.items()):
         refined, proof, next_node = corner.refine_component(item, next_node, threshold)
@@ -72,24 +72,76 @@ def retained_fixture(root):
     processor = {"path":"tools/teaching_tetra_corner_refinement.py","bytes":processor_source.stat().st_size,"sha256":sha256(processor_source.read_bytes()).hexdigest()}
     manifest = {"schemaVersion":geometry.MANIFEST_SCHEMA,"provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI",
         "parameters":plan["parameters"],"parametersSha256":plan["parametersSha256"],"geometryIdentity":plan["geometryIdentity"],
-        "geometryIdentitySha256":plan["geometryIdentitySha256"],"meshLevel":"coarse","meshSizeM":plan["meshSizeM"],
+        "geometryIdentitySha256":plan["geometryIdentitySha256"],"meshLevel":mesh_level,"meshSizeM":plan["meshSizeM"],
         "generatorSourceCommit":"a"*40,"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,"cadEvidenceSha256":sha256(geometry.encoded(cad)).hexdigest(),
         "limits":dict(geometry.LIMITS),"files":[geometry.record(root / name) for name in geometry.FILES],"mainApplicationWrites":False}
+    if "resolutionSizing" in plan:manifest["resolutionSizing"]=plan["resolutionSizing"]
     (root / geometry.MANIFEST).write_bytes(geometry.encoded(manifest))
     report = {"schemaVersion":geometry.SCHEMA,"createdAt":"2026-10-12T12:00:00+00:00",
         "status":"AUTHORED_CAD_VOLUME_MESH_NATIVE_CHECKS_REQUIRED","provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI",
         "generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
         "parametersSha256":plan["parametersSha256"],"geometryIdentitySha256":plan["geometryIdentitySha256"],
-        "inputManifestSha256":sha256(geometry.encoded(manifest)).hexdigest(),"parameters":plan["parameters"],"meshLevel":"coarse",
+        "inputManifestSha256":sha256(geometry.encoded(manifest)).hexdigest(),"parameters":plan["parameters"],"meshLevel":mesh_level,
         "limits":dict(geometry.LIMITS),"gmshVersion":geometry.GMSH_VERSION,"nativeCADConstructed":True,"volumeMeshGenerated":True,
         "components":components,"commonInterfaceEvidence":geometry.common_interface(data["impeller"],data["volute"],[10]),
         "cadEvidence":cad,"cadEvidenceSha256":manifest["cadEvidenceSha256"],"equationStages":plan["equationStages"],
         "elapsedSeconds":1.,"references":geometry.REFERENCES,**{key:False for key in geometry.FALSE_FLAGS}}
+    if "resolutionSizing" in plan:report["resolutionSizing"]=plan["resolutionSizing"]
     (root / geometry.REPORT).write_bytes(geometry.encoded(report))
     return report, manifest
 
 
 class TeachingParametersTests(unittest.TestCase):
+    def test_old_head_pure_plan_bytes_are_unchanged_for_all_legacy_levels(self):
+        # Captured before this delta from HEAD c38069d38cd84006a3ff8ba824b59eddec3a8cdd.
+        # These are pure canonical plan hashes, not native execution acceptance.
+        golden={
+            'default:coarse':'58a065793dd5115f68b7c31a59704aeea3bfa69f0b3d5bd82b21ded1a8605794',
+            'default:medium':'77b4e6f4882a4e422a7b69ed2191a4b09eea305dc0f53d8923f2ebbdb6b49687',
+            'default:fine':'765b6ccb650bd85e3bf9a60dcd9c507444ef62ef590da9566870585811d16b3a',
+            'operating:coarse':'50650f14fcf8a6270039aba826e0bf92e73d53477c0bedd254aeec69a2ea5061',
+            'operating:medium':'abcf8f18c0a77edea6344c9789a0eaeac99c0b6f94faefcfb3e4025a129c96c4',
+            'operating:fine':'59852da358eedc663a3589010e44d15f476bbac94303d268586241fdafd8885b'}
+        for tag,values in (('default',None),('operating',{'speedRpm':1800.,'massFlowKgS':40.})):
+            for level in ('coarse','medium','fine'):
+                plan=geometry.teaching_plan(values,level)
+                self.assertEqual(sha256(geometry.encoded(plan)).hexdigest(),golden[tag+':'+level])
+                self.assertNotIn('resolutionSizing',plan)
+                self.assertEqual(plan['meshCellTargetRange'],[200000,500000])
+        self.assertEqual(geometry.teaching_plan(),geometry.teaching_plan(mesh_level='coarse'))
+
+    def test_lean_three_sizing_order_same_cad_and_no_result_or_resource_waiver(self):
+        plans=[geometry.teaching_plan(mesh_level=level) for level in ('lean-coarse','lean-medium','lean-fine')]
+        old=geometry.teaching_plan()
+        self.assertEqual([p['meshSizeM'] for p in plans],[.0095,.0075,.0055])
+        self.assertTrue(all(plans[i]['meshSizeM']>plans[i+1]['meshSizeM'] for i in range(2)))
+        for plan in plans:
+            self.assertEqual(geometry.encoded(plan['geometryIdentity']),geometry.encoded(old['geometryIdentity']))
+            self.assertEqual(plan['geometryIdentitySha256'],old['geometryIdentitySha256'])
+            self.assertEqual(plan['parameters'],old['parameters']);self.assertEqual(plan['equationStages'],old['equationStages'])
+            self.assertEqual(plan['limits'],old['limits']);self.assertEqual(plan['meshCellTargetRange'],[50000,250000])
+            sizing=plan['resolutionSizing'];self.assertEqual(sizing['family'],'lean-three')
+            self.assertFalse(sizing['targetIsMeasuredCellCount']);self.assertFalse(sizing['targetIsAcceptanceGate'])
+            self.assertFalse(sizing['countsPredictedOrGuaranteed']);self.assertFalse(sizing['sameDiscreteBoundaryClaimed'])
+            self.assertFalse(sizing['meshConvergenceDemonstrated']);self.assertFalse(sizing['oldNativePacketCompatibilityClaimed'])
+            self.assertTrue(sizing['nativeLimitsUnchanged']);self.assertTrue(all(plan[k] is False for k in geometry.FALSE_FLAGS))
+            self.assertNotIn('cellCount',plan);self.assertNotIn('actualCombinedCellCount',sizing)
+        self.assertEqual(geometry.LEGACY_MESH_LEVELS,{'coarse':.0055,'medium':.0042,'fine':.0032})
+        self.assertEqual(geometry.LIMITS['maximumCombinedCells'],500000)
+        # Independent plan objects cannot mutate the shared sizing declaration.
+        plans[0]['resolutionSizing']['declaredCombinedCellTargetRange'][0]=1
+        self.assertEqual(geometry.teaching_plan(mesh_level='lean-coarse')['meshCellTargetRange'],[50000,250000])
+
+    def test_geometry_workflow_keeps_default_old_choices_and_adds_only_lean_three(self):
+        path=Path(__file__).resolve().parents[1]/'.github/workflows/teaching-pump-free-geometry.yml';text=path.read_text()
+        self.assertIn('default: coarse',text)
+        self.assertIn('options: [coarse, medium, fine, lean-coarse, lean-medium, lean-fine]',text)
+        self.assertIn('case "$TEACHING_MESH_LEVEL" in coarse|medium|fine|lean-coarse|lean-medium|lean-fine) ;; *) exit 2 ;; esac',text)
+        self.assertIn('timeout-minutes: 45',text);self.assertIn('CPUQuota=100%',text)
+        self.assertIn('MemoryMax=4294967296',text);self.assertIn('MemoryMax=2147483648',text)
+        self.assertIn('tools/public_runner_guard.py',text);self.assertIn('tools/run_teaching_pump_geometry.py',text)
+        self.assertNotIn('run_teaching_pump_baseline.py',text);self.assertNotIn('run_teaching_pump_phase.py',text)
+
     def test_equations_are_actual_python_input_reductions_with_no_solver_claim(self):
         plan = geometry.teaching_plan(); p = plan["parameters"]
         self.assertAlmostEqual(plan["equationStages"]["angularSpeed"]["result"]["value"], 2*math.pi*1450/60)
@@ -181,6 +233,28 @@ class TeachingTopologyTests(unittest.TestCase):
 
 
 class TeachingEvidenceTests(unittest.TestCase):
+    def test_lean_sizing_target_does_not_replace_measured_topology_or_become_gate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)/'mesh';report,manifest=retained_fixture(root,'lean-coarse')
+            result=geometry.verify_output(root)
+            self.assertEqual(result['report'],report)
+            actual=sum(c['cellCount'] for c in report['components'])
+            self.assertLess(actual,50000)  # Explicit small synthetic topology, not a real mesh.
+            self.assertNotIn('resolutionSizing',manifest['geometryIdentity'])
+            self.assertTrue(all(report[k] is False for k in geometry.FALSE_FLAGS))
+
+    def test_rehashed_lean_sizing_omission_promotion_range_or_label_tamper_rejects(self):
+        for change in ('omit','range','promote','old-label'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp)/'mesh';report,manifest=retained_fixture(root,'lean-medium')
+                if change=='omit':report.pop('resolutionSizing');manifest.pop('resolutionSizing')
+                elif change=='range':report['resolutionSizing']['declaredCombinedCellTargetRange']=[1,500000];manifest['resolutionSizing']=deepcopy(report['resolutionSizing'])
+                elif change=='promote':report['resolutionSizing']['meshConvergenceDemonstrated']=True;manifest['resolutionSizing']=deepcopy(report['resolutionSizing'])
+                else:report['meshLevel']=manifest['meshLevel']='medium'
+                (root/geometry.MANIFEST).write_bytes(geometry.encoded(manifest));report['inputManifestSha256']=sha256(geometry.encoded(manifest)).hexdigest()
+                (root/geometry.REPORT).write_bytes(geometry.encoded(report))
+                with self.assertRaises(geometry.GeometryIssue):geometry.verify_output(root)
+
     def test_complete_synthetic_inventory_replays_without_gmsh(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)/"mesh"; report,_ = retained_fixture(root)

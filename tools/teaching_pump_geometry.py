@@ -31,7 +31,9 @@ GMSH_VERSION = "4.15.2"
 LIMITS = {"maximumSeconds":900,"cpus":1,"maximumMemoryBytes":4*1024**3,"maximumWorkspaceBytes":512*1024**2,
           "maximumFileBytes":128*1024**2,"maximumReportBytes":128*1024,"maximumLogBytes":4*1024**2,
           "maximumCellsPerComponent":450000,"maximumCombinedCells":500000,"maximumNodesPerComponent":500000,"maximumCombinedNodes":1000000}
-MESH_LEVELS = {"coarse":.0055,"medium":.0042,"fine":.0032}
+LEGACY_MESH_LEVELS = {"coarse":.0055,"medium":.0042,"fine":.0032}
+LEAN_MESH_LEVELS = {"lean-coarse":.0095,"lean-medium":.0075,"lean-fine":.0055}
+MESH_LEVELS = {**LEGACY_MESH_LEVELS, **LEAN_MESH_LEVELS}
 DEFAULTS = {"impellerTipRadiusM":.13,"interfaceRadiusM":.1405,"diskHeightM":.04363,"hubRadiusM":.01968,
             "eyeRadiusM":.0844,"inletLengthM":.06,"bladeStartRadiusM":.0875,"bladeThicknessM":.004,
             "bladeSweepRad":-.7,"bladeCount":6,"voluteWidthStartM":.01,"voluteWidthEndM":.12,
@@ -95,6 +97,17 @@ def equation(inputs, expression, substitution, result, unit):
     return {"input":inputs,"equation":expression,"substitution":substitution,"result":{"value":result,"unit":unit},"calculationAuthority":"Python"}
 
 
+def resolution_sizing(mesh_level):
+    """Lean planning metadata only; actual count and all native gates are separate."""
+    require(isinstance(mesh_level,str) and mesh_level in MESH_LEVELS,"Choose an exact reviewed mesh resolution ID.")
+    if mesh_level not in LEAN_MESH_LEVELS:return None
+    return {"family":"lean-three","declaredCombinedCellTargetRange":[50000,250000],
+        "targetIsMeasuredCellCount":False,"targetIsAcceptanceGate":False,"countsPredictedOrGuaranteed":False,
+        "nativeLimitsUnchanged":True,"meshConvergenceDemonstrated":False,"sameDiscreteBoundaryClaimed":False,
+        "oldNativePacketCompatibilityClaimed":False,
+        "scope":"Coarser sizing candidates on the exact same authored CAD. Actual counts, surface tessellation, native quality/interface coverage and refinement results must be measured independently; the target range is not an acceptance or count promise."}
+
+
 def teaching_plan(values=None, mesh_level="coarse"):
     p = validate_parameters(values); require(isinstance(mesh_level,str) and mesh_level in MESH_LEVELS, "Choose coarse, medium or fine explicitly.")
     rpm,rho,mass=p["speedRpm"],p["densityKgM3"],p["massFlowKgS"]
@@ -109,7 +122,7 @@ def teaching_plan(values=None, mesh_level="coarse"):
               "parameters":{key:p[key] for key in GEOMETRY_KEYS},"axis":[0,0,1],"originM":[0,0,0],
               "construction":"OCC annular axial eye + blade-subtracted disk; growing polar volute plus tangential outlet; one shared cylindrical CAD interface from fragments",
               "manufacturerIdentity":None,"originalFluentSourceIdentity":None}
-    return {"schemaVersion":"untirta.teaching-pump-cad-plan.v1","status":"AuthoredPlanNativeCADAndMeshRequired","provenance":"CLASSROOM_AUTHORED_GEOMETRY",
+    plan={"schemaVersion":"untirta.teaching-pump-cad-plan.v1","status":"AuthoredPlanNativeCADAndMeshRequired","provenance":"CLASSROOM_AUTHORED_GEOMETRY",
             "units":"SI","parameters":p,"parametersSha256":sha256(encoded(p)).hexdigest(),"geometryIdentity":identity,
             "geometryIdentitySha256":sha256(encoded(identity)).hexdigest(),"meshLevel":mesh_level,"meshSizeM":MESH_LEVELS[mesh_level],
             "meshCellTargetRange":[200000,500000],"limits":dict(LIMITS),"equationStages":stages,"boundaryRoleMap":ROLES,
@@ -118,6 +131,11 @@ def teaching_plan(values=None, mesh_level="coarse"):
                                   "Same initial interface coordinates/triangles with opposite outward ownership","Independent native full checkMesh and NCC","Actual numerical flow/cavitation/transient gates"],
             "references":REFERENCES,**{key:False for key in FALSE_FLAGS},"nativeCADConstructed":False,"volumeMeshGenerated":False,
             "claimBoundary":"Geometry and independent input equations only. No head, NPSHR, pump curve, solver result or CFD readiness is calculated."}
+    sizing=resolution_sizing(mesh_level)
+    if sizing is not None:
+        plan["meshCellTargetRange"]=list(sizing["declaredCombinedCellTargetRange"])
+        plan["resolutionSizing"]=sizing
+    return plan
 
 
 def blade_edges(p, blade_index):
@@ -370,6 +388,7 @@ def generate(parameters, output_directory, mesh_level="coarse"):
                   "parametersSha256":plan["parametersSha256"],"geometryIdentity":plan["geometryIdentity"],"geometryIdentitySha256":plan["geometryIdentitySha256"],
                   "meshLevel":mesh_level,"meshSizeM":plan["meshSizeM"],"generatorSourceCommit":os.environ["GITHUB_SHA"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
                   "cadEvidenceSha256":sha256(encoded(cad)).hexdigest(),"limits":LIMITS,"files":[record(destination/name) for name in FILES],"mainApplicationWrites":False}
+        if "resolutionSizing" in plan:manifest["resolutionSizing"]=plan["resolutionSizing"]
         with (destination/MANIFEST).open("xb") as stream:stream.write(encoded(manifest))
         report={"schemaVersion":SCHEMA,"createdAt":datetime.now(timezone.utc).isoformat(),"status":"AUTHORED_CAD_VOLUME_MESH_NATIVE_CHECKS_REQUIRED",
                 "provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI","generatorSourceCommit":manifest["generatorSourceCommit"],"generatorSourceFile":generator,"meshPostProcessorSourceFile":processor,
@@ -378,6 +397,7 @@ def generate(parameters, output_directory, mesh_level="coarse"):
                 "components":components,"commonInterfaceEvidence":interface,"cadEvidence":cad,"cadEvidenceSha256":manifest["cadEvidenceSha256"],"equationStages":plan["equationStages"],
                 "elapsedSeconds":time.monotonic()-started,"references":REFERENCES,**{key:False for key in FALSE_FLAGS},
                 "claimBoundary":"New authored SI teaching pump CAD and actual geometric mesh evidence only. Native OpenFOAM quality/coupling, flow, NPSH3, physical transient and numerical validation remain separate."}
+        if "resolutionSizing" in plan:report["resolutionSizing"]=plan["resolutionSizing"]
         raw=encoded(report);require(len(raw)<=LIMITS["maximumReportBytes"] and time.monotonic()-started<LIMITS["maximumSeconds"],"Bounded native generation report/time limit reached.")
         with (destination/REPORT).open("xb") as stream:stream.write(raw)
         verify_output(destination);require(time.monotonic()-started<LIMITS["maximumSeconds"],"The native teaching deadline was reached during final source/mesh verification.");return report
@@ -388,6 +408,10 @@ def verify_output(directory):
     import teaching_tetra_corner_refinement as corner
     root=Path(directory).absolute();require(root.is_dir() and {p.name for p in root.iterdir()}=={*FILES,REPORT,MANIFEST},"Retain only the exact authored CAD/mesh manifest inventory.")
     report=json_file(root/REPORT);manifest=json_file(root/MANIFEST);plan=teaching_plan(manifest.get("parameters"),manifest.get("meshLevel"))
+    sizing=plan.get("resolutionSizing")
+    require((manifest.get("resolutionSizing")==report.get("resolutionSizing")==sizing if sizing is not None
+        else "resolutionSizing" not in manifest and "resolutionSizing" not in report),
+        "Replay the exact lean sizing declaration, separate from actual cell counts and unchanged native acceptance.")
     require(report.get("schemaVersion")==SCHEMA and manifest.get("schemaVersion")==MANIFEST_SCHEMA and report.get("provenance")==manifest.get("provenance")=="CLASSROOM_AUTHORED_GEOMETRY"
             and report.get("units")==manifest.get("units")=="SI" and report.get("status")=="AUTHORED_CAD_VOLUME_MESH_NATIVE_CHECKS_REQUIRED"
             and report.get("nativeCADConstructed") is True and report.get("volumeMeshGenerated") is True
