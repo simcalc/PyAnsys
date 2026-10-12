@@ -196,6 +196,20 @@ def build_manifest(execution_directory):
     return {"geometryIdentity": identity, "manifest": manifest, "study": study}
 
 
+def teaching_endpoint_fields(root, execution, cell_count, records):
+    """Replay only the teaching writer roles; legacy source readers stay strict."""
+    import run_teaching_pump_baseline as runner
+    primary, rows, scans = runner.final_fields(root, cell_count)
+    require(len(primary) == 4 and {row["name"] for row in primary} == {"p", "U", "k", "omega"}
+            and 5 <= len(rows) <= 24 and len({row["path"] for row in rows}) == len(rows)
+            and primary == execution.get("finalNativeFields") and rows == execution.get("finalNativeFieldRecords")
+            and scans == execution.get("finiteNativeFieldEvidence"), "TEACHING_CURRENT_COMPLETE_ENDPOINT_SCAN_REQUIRED")
+    for row in rows:
+        require(read(root, row["path"], native.MAX_FIELD)[1] == row, "TEACHING_CURRENT_ENDPOINT_BYTE_BINDING_REQUIRED")
+        equations.add_record(records, row)
+    return [scan for scan in scans if scan["name"] in {"p", "U", "k", "omega"}]
+
+
 def execution_evidence(root, manifest, records):
     import run_teaching_pump_baseline as runner
     execution, row = record(root, EXECUTION_FILE)
@@ -241,7 +255,7 @@ def execution_evidence(root, manifest, records):
     require(measured == execution.get("mergedNativeMeshEvidence"), "TEACHING_CURRENT_MERGED_NATIVE_MESH_REQUIRED")
     mesh = native.parse_mesh_quality(logs["checkMesh"])
     require(mesh["meshCellCount"] == measured["mergedCellCount"], "TEACHING_CURRENT_NATIVE_CELL_COUNT_REQUIRED")
-    fields = equations.endpoint_fields(root, execution, mesh["meshCellCount"], records)
+    fields = teaching_endpoint_fields(root, execution, mesh["meshCellCount"], records)
     sampling = execution.get("nativeSamplingRecords")
     require(isinstance(sampling, list) and sampling and len(sampling) <= 128 and len({r.get("path") for r in sampling}) == len(sampling), "TEACHING_NATIVE_SAMPLING_INVENTORY_REQUIRED")
     for row in sampling:

@@ -126,6 +126,44 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             self.assertIn(b'endTime 500;',files['system/controlDict'])
         self.assertNotIn('wallDist',case.physics.case_files('impeller')['system/fvSchemes'])
 
+    def test_stabilization_changes_numerics_without_changing_physical_inputs_or_old_recipe(self):
+        for component in ('impeller','volute'):
+            original={p:text.encode('ascii') for p,text in case.physics.case_files(component,300000).items()}
+            before={p:sha256(raw).hexdigest() for p,raw in original.items()}
+            fresh=case.case_files(component)
+            self.assertEqual(set(fresh),set(original))
+            for path in set(original)-{'system/fvSchemes','system/fvSolution'}:
+                self.assertEqual(fresh[path],original[path],path)
+            self.assertEqual(before,{p:sha256(text.encode('ascii')).hexdigest() for p,text in case.physics.case_files(component,300000).items()})
+            self.assertIn(b'div(phi,U) bounded Gauss upwind;',fresh['system/fvSchemes'])
+            self.assertIn(b'div(phi,k) bounded Gauss upwind;',fresh['system/fvSchemes'])
+            self.assertIn(b'div(phi,omega) bounded Gauss upwind;',fresh['system/fvSchemes'])
+            self.assertNotIn(b'limitedLinear',fresh['system/fvSchemes'])
+            self.assertIn(b'limited corrected 0.5',fresh['system/fvSchemes'])
+            self.assertIn(b'nNonOrthogonalCorrectors 2;',fresh['system/fvSolution'])
+            self.assertIn(b'endTime 500;',fresh['system/controlDict'])
+        profile=case.ASSUMPTIONS['numericalStabilization']
+        self.assertEqual(profile['convectiveOrder'],1);self.assertFalse(profile['accuracyQualified']);self.assertFalse(profile['convergencePredicted'])
+        self.assertEqual(profile['priorRejectedRunId'],'38190272870')
+        self.assertEqual(case.LIMITS['maximumSeconds'],1200)
+
+    def test_pressure_and_transport_linear_stopping_and_underrelaxation_are_separate(self):
+        raw=case.case_files('impeller')['system/fvSolution'].decode('ascii')
+        pressure=case.re.search(r'\bp\s*\{([^{}]+)\}',raw)[1]
+        transport=case.re.search(r'"\(U\|k\|omega\)"\s*\{([^{}]+)\}',raw)[1]
+        self.assertIn('tolerance 1e-8;',pressure);self.assertIn('relTol 0;',pressure);self.assertIn('maxIter 100;',pressure)
+        self.assertIn('tolerance 1e-7;',transport);self.assertIn('relTol 0.01;',transport)
+        self.assertIn('minIter 1;',transport);self.assertIn('maxIter 100;',transport)
+        self.assertIn('fields {p 0.2;}',raw);self.assertIn('equations {U 0.3; k 0.3; omega 0.3;}',raw)
+
+    def test_unreviewed_upstream_scheme_is_rejected_before_numerical_override(self):
+        original=case.physics.case_files
+        def changed(component,pressure):
+            result=original(component,pressure)
+            result['system/fvSchemes']=result['system/fvSchemes'].replace('div(phi,k) bounded Gauss limitedLinear 1;','div(phi,k) Gauss linear;')
+            return result
+        with mock.patch.object(case.physics,'case_files',side_effect=changed),self.assertRaises(case.BaselineCaseIssue):case.case_files('impeller')
+
     def fixture(self,root):
         with self.environment(str(root)):
             # The synthetic geometry producer verifier is intentionally mocked;
@@ -147,6 +185,7 @@ class TeachingBaselineCaseTests(unittest.TestCase):
                 output=root/'baseline';prepared=case.prepare(source,output);self.assertEqual(case.verify_output(output)['report'],prepared)
                 self.assertTrue(all(prepared[k] is False for k in case.FALSE_FLAGS));self.assertEqual(len(prepared['initialCaseMeshFiles']),12)
                 self.assertFalse(prepared['baselineFieldsCopied']);self.assertTrue(prepared['sourceNativeGeometryQualityVerified'])
+                self.assertEqual(prepared['classroomAssumptions']['numericalStabilization'],case.NUMERICAL_PROFILE)
                 (output/'impeller-case/constant/MRFProperties').write_bytes(b'MUTATED')
                 with self.assertRaises(case.BaselineCaseIssue):case.verify_output(output)
 

@@ -1,0 +1,166 @@
+name: Authored classroom pump pressure only cavitation point
+'on':
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Completed accepted active phase reference run ID
+        required: true
+        type: string
+      source_commit:
+        description: Exact forty character commit of that source run
+        required: true
+        type: string
+      pressure_absolute_pa:
+        description: Explicit inlet total absolute pressure in Pa, above 2339 and at most 300000
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: authored-teaching-pressure-${{ inputs.pressure_absolute_pa }}
+  cancel-in-progress: false
+jobs:
+  pressure_point:
+    name: FREE authored active H0 replay and pressure only point
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_EXTRA_INDEX_URL: ''
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      SOURCE_PHASE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_PHASE_COMMIT: ${{ inputs.source_commit }}
+      PRESSURE_ABSOLUTE_PA: ${{ inputs.pressure_absolute_pa }}
+    steps:
+    - name: Check out the independent public repository
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Verify exact public FREE runner and bounded source and pressure inputs
+      env:
+        PYANSYS_REPOSITORY_READ_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -B tools/public_runner_guard.py
+        python3 -B - <<'PY'
+        import os, re, math
+        assert re.fullmatch(r"[1-9][0-9]{0,18}", os.environ['SOURCE_PHASE_RUN_ID'])
+        assert re.fullmatch(r"[0-9a-f]{40}", os.environ['SOURCE_PHASE_COMMIT'])
+        p = float(os.environ['PRESSURE_ABSOLUTE_PA'])
+        assert math.isfinite(p) and 2339 < p <= 300000
+        PY
+    - name: Set up CPython 3.12.10
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: 3.12.10
+    - name: Install the isolated pinned CAD and source readers
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -q
+        sudo apt-get install --no-install-recommends -y libglu1-mesa
+        python -m venv "$RUNNER_TEMP/teaching-pump-python"
+        "$RUNNER_TEMP/teaching-pump-python/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4 gmsh==4.15.2
+        "$RUNNER_TEMP/teaching-pump-python/bin/python" -m pip check
+    - name: Verify source transfer and engineering contracts
+      run: '"$RUNNER_TEMP/teaching-pump-python/bin/python" -B -m unittest discover -s tests -v'
+    - name: Download only the pinned completed active phase reference
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        gh api "repos/simcalc/PyAnsys/actions/runs/$SOURCE_PHASE_RUN_ID" > "$RUNNER_TEMP/phase-source-run.json"
+        gh api "repos/simcalc/PyAnsys/actions/runs/$SOURCE_PHASE_RUN_ID/jobs" > "$RUNNER_TEMP/phase-source-jobs.json"
+        gh api "repos/simcalc/PyAnsys/actions/runs/$SOURCE_PHASE_RUN_ID/artifacts" > "$RUNNER_TEMP/phase-source-artifacts.json"
+        "$RUNNER_TEMP/teaching-pump-python/bin/python" -B - <<'PY'
+        import json, os, resource, subprocess, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools')
+        from teaching_pump_phase_source import validate_metadata
+        root = Path(os.environ['RUNNER_TEMP'])
+        meta = [json.loads((root / ('phase-source-' + name + '.json')).read_text()) for name in ('run','jobs','artifacts')]
+        admitted = validate_metadata(os.environ['SOURCE_PHASE_RUN_ID'], os.environ['SOURCE_PHASE_COMMIT'], *meta)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (300 * 1024**2, 300 * 1024**2))
+        with (root / 'phase-source-artifact.zip').open('xb') as stream:
+            subprocess.run(['gh', 'api', 'repos/simcalc/PyAnsys/actions/artifacts/' + str(admitted['artifactId']) + '/zip'], stdout=stream, check=True, timeout=300)
+        PY
+    - name: Admit whole archive and preserve every source evidence byte
+      env:
+        PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo --preserve-env=PATH,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP,SOURCE_PHASE_RUN_ID,SOURCE_PHASE_COMMIT \
+          systemd-run --scope --unit="teaching-phase-source-${GITHUB_RUN_ID}" \
+          -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+          /usr/bin/timeout --kill-after=10s 330s \
+          "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/teaching_pump_phase_source.py \
+          --archive "$RUNNER_TEMP/phase-source-artifact.zip" \
+          --run-json "$RUNNER_TEMP/phase-source-run.json" --jobs-json "$RUNNER_TEMP/phase-source-jobs.json" \
+          --artifacts-json "$RUNNER_TEMP/phase-source-artifacts.json" \
+          --source-run-id "$SOURCE_PHASE_RUN_ID" --source-commit "$SOURCE_PHASE_COMMIT" \
+          --output-directory "$RUNNER_TEMP/teaching-phase-source"
+    - name: Install checksum-pinned OpenFOAM Foundation 12
+      run: bash tools/install_openfoam12.sh
+    - name: Recompute source active H0 using current installed native identity
+      env:
+        PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$RUNNER_TEMP/teaching-pump-python/bin/python" -B - <<'PY'
+        import os, json, sys
+        from pathlib import Path
+        sys.path.insert(0, 'tools')
+        from teaching_pump_pressure_case import verify_reference
+        current = verify_reference(Path(os.environ['RUNNER_TEMP']) / 'teaching-phase-source/source-reference')
+        print(json.dumps({'sourceRunId':os.environ['SOURCE_PHASE_RUN_ID'], 'sourceCommit':os.environ['SOURCE_PHASE_COMMIT'], 'phaseH0Eligible':current['packet']['phaseH0Eligible'], 'activePhaseReferenceHeadM':current['packet']['activePhaseReferenceHeadM'], 'currentReportSha256':current['reportFile']['sha256'], 'mainApplicationWrites':False}))
+        PY
+    - name: Execute one fresh bounded pressure only active phase MRF point
+      env:
+        PYANSYS_PUBLIC_REPOSITORY_VISIBILITY: public
+      shell: bash
+      run: |
+        set -euo pipefail
+        set +eu
+        source /opt/openfoam12/etc/bashrc
+        foam_source_status=$?
+        set -euo pipefail
+        test "$foam_source_status" -eq 0
+        test "${WM_PROJECT_VERSION:-}" = 12
+        foam_library_path="${LD_LIBRARY_PATH:-}"
+        test -n "$foam_library_path"
+        sudo --preserve-env=PATH,LD_LIBRARY_PATH,WM_PROJECT_VERSION,WM_PROJECT_DIR,FOAM_LIBBIN,FOAM_APPBIN,FOAM_ETC,GITHUB_ACTIONS,GITHUB_REPOSITORY,PYANSYS_PUBLIC_REPOSITORY_VISIBILITY,GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,RUNNER_OS,RUNNER_ENVIRONMENT,GITHUB_SHA,GITHUB_RUN_ID,RUNNER_TEMP,PRESSURE_ABSOLUTE_PA \
+          systemd-run --scope --unit="teaching-pump-pressure-${GITHUB_RUN_ID}" \
+          -p MemoryMax=4294967296 -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+          /usr/bin/timeout --kill-after=10s 1260s \
+          /usr/bin/env "LD_LIBRARY_PATH=$foam_library_path" \
+          "$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/run_teaching_pump_pressure.py \
+          --reference-directory "$RUNNER_TEMP/teaching-phase-source/source-reference" --output-directory "$RUNNER_TEMP/teaching-pump-pressure" --pressure-absolute-pa "$PRESSURE_ABSOLUTE_PA"
+    - name: Require independent actual pressure point numerical acceptance
+      run: '"$RUNNER_TEMP/teaching-pump-python/bin/python" -B tools/reduce_teaching_pump_pressure.py --execution-directory "$RUNNER_TEMP/teaching-pump-pressure"'
+    - name: Retain separate whole source transfer evidence
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: authored-teaching-pump-phase-source-${{ github.run_id }}
+        path: ${{ runner.temp }}/teaching-phase-source/
+        if-no-files-found: warn
+        retention-days: 1
+    - name: Retain separate actual pressure point evidence even on failure
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: authored-teaching-pump-pressure-${{ github.run_id }}
+        path: ${{ runner.temp }}/teaching-pump-pressure/
+        if-no-files-found: warn
+        retention-days: 1

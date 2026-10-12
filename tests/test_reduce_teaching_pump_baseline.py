@@ -93,7 +93,7 @@ class TeachingBaselineReduction(unittest.TestCase):
         for name, patch_name, value in zip(("flowRotorInterface", "flowStatorInterface"), tool.native.COUPLED_PATCHES, (q, -q)):
             self.write(root, f"impeller-case/postProcessing/{name}/0/surfaceFieldValue.dat", self.table(patch_name, ("sum(phi)",), [value]))
         import run_teaching_pump_baseline as runner
-        fields, field_rows, _ = runner.final_fields(root, 2)
+        fields, field_rows, scans = runner.final_fields(root, 2)
         execution = {"schemaVersion": tool.EXECUTION_SCHEMA, "status": "TEACHING_MRF_EXECUTED_NUMERICAL_ACCEPTANCE_REQUIRED",
             "sourceGeometryRoute": tool.ROUTE, "preparationReportSha256": prep_row["sha256"], "runtimeIdentitySha256": runtime_row["sha256"],
             "sourceGeometryExecutionReportSha256": source_exec["sha256"], "inputManifestSha256": rows[tool.MANIFEST_FILE]["sha256"],
@@ -102,7 +102,8 @@ class TeachingBaselineReduction(unittest.TestCase):
                 "nativeGeometryQualityVerified", "physicalWallTypesVerified", "coupledInterfaceCoverageVerified", "nativeSolverCompleted",
                 "finiteNativeFieldsVerified", "inputArtifactsImmutable", "sourceGeometryImmutable")},
             "githubRepository": "simcalc/PyAnsys", "githubRunId": "123456789", "githubSourceCommit": "a" * 40, "stages": stages,
-            "finalNativeFields": fields, "finalNativeFieldRecords": field_rows, "nativeSamplingRecords": runner.sampling_records(root),
+            "finalNativeFields": fields, "finalNativeFieldRecords": field_rows, "finiteNativeFieldEvidence": scans,
+            "nativeSamplingRecords": runner.sampling_records(root),
             "nativeNccDiagnosticRecords": runner.ncc_diagnostic_records(root),
             "mergedNativeMeshEvidence": {"mergedCellCount": 2, "mergedPointCount": 2, "fixtureKind": "SYNTHETIC-NOT-NATIVE-MESH"}}
         execution.update(limits=dict(runner.LIMITS), elapsedSeconds=20, workspaceBytes=runner.workspace_size(root))
@@ -263,6 +264,48 @@ class TeachingBaselineReduction(unittest.TestCase):
                 value["nativeCheckMeshDiagnosticRecords"] = []; self.update_execution(root, value)
                 result = tool.reduce_baseline(root); self.assertFalse(result["actualCfdRunVerified"])
                 self.assertIn("NEAR_POINTS_DIAGNOSTIC", str(result["diagnostics"]))
+
+    def test_teaching_yplus_empty_dimensions_and_face_velocity_are_exact_bound_data(self):
+        import run_teaching_pump_baseline as runner
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root)
+            extra = [self.write(root, "impeller-case/500/yPlus",
+                "FoamFile {format ascii; class volScalarField; object yPlus;}\ndimensions [];\ninternalField uniform 30;\nboundaryField {}\n"),
+                self.write(root, "impeller-case/500/Uf",
+                "FoamFile {format ascii; class surfaceVectorField; object Uf;}\ndimensions [0 1 -1 0 0 0 0];\ninternalField uniform (1 2 3);\nboundaryField {}\n")]
+            primary, rows, scans = runner.final_fields(root, 2)
+            raw, _ = tool.record(root, tool.EXECUTION_FILE)
+            raw.update(finalNativeFields=primary, finalNativeFieldRecords=rows, finiteNativeFieldEvidence=scans)
+            self.update_execution(root, raw)
+            # Only the new teaching adapter is used. Legacy original/snappy
+            # endpoint admission must not be relaxed by this compatibility fix.
+            with patch.object(tool.equations, "endpoint_fields", side_effect=AssertionError("Legacy reader must not be called")):
+                result = tool.reduce_baseline(root)
+            self.assertTrue(result["numericalBaselineQualified"], result["diagnostics"])
+            self.assertTrue(all(row in result["nativeEvidenceRecords"] for row in extra))
+            self.assertFalse(result["wallResolutionVerified"])
+            for role in ("inventory", "scan", "primary"):
+                with self.subTest(role=role):
+                    changed = dict(raw)
+                    if role == "inventory": changed["finalNativeFieldRecords"] = rows[:-1]
+                    elif role == "scan": changed["finiteNativeFieldEvidence"] = scans[:-1]
+                    else: changed["finalNativeFields"] = primary[:-1]
+                    self.update_execution(root, changed)
+                    result = tool.reduce_baseline(root)
+                    self.assertFalse(result["actualCfdRunVerified"])
+                    self.assertIn("COMPLETE_ENDPOINT_SCAN", str(result["diagnostics"]))
+
+    def test_endpoint_scan_cannot_relabel_unknown_fields_or_mutated_hashes(self):
+        import run_teaching_pump_baseline as runner
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root)
+            raw, _ = tool.record(root, tool.EXECUTION_FILE)
+            raw["finalNativeFieldRecords"][0]["sha256"] = "0" * 64
+            self.update_execution(root, raw)
+            self.assertFalse(tool.reduce_baseline(root)["actualCfdRunVerified"])
+            self.write(root, "impeller-case/500/unknownField",
+                "FoamFile {format ascii; class volScalarField; object unknownField;}\ndimensions [];\ninternalField uniform 0;\nboundaryField {}\n")
+            with self.assertRaises(ValueError): runner.final_fields(root, 2)
 
 
 if __name__ == "__main__": unittest.main()

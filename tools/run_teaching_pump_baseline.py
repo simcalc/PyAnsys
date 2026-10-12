@@ -19,7 +19,6 @@ import time
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import run_teaching_pump_geometry as geometry
-import run_frozen_rotor_original as endpoint
 import frozen_rotor_native_reduction as scientific
 
 base,safety,native=geometry.base,geometry.safety,geometry.native
@@ -147,9 +146,52 @@ def bind_manifest(output):
 
 
 def final_fields(output,cells):
-    # This reviewed pure parser scans every endpoint cell and exact SI native
-    # dimensions. It does not apply old HDF5/remesh provenance or qualification.
-    return endpoint.final_fields(Path(output),cells)
+    """Scan teaching endpoint bytes without changing the legacy source reader.
+
+    Foundation12 writes dimensionless yPlus as [] (dimensionSetIO.C129--155)
+    and MRF creates AUTO_WRITE Uf from interpolate(U)
+    (incompressibleFluid.C153--172). Only those observed native roles extend
+    the previous dimensional/finite scan; original files stay byte exact.
+    """
+    output=base.regular_directory(output);directory=base.regular_directory(output/"impeller-case/500")
+    require(type(cells) is int and 0<cells<=500000,"Use the actual bounded admitted teaching cell count.")
+    dimensions={"nut":"0 2 -1 0 0 0 0","totalPressurePa":"1 -1 -2 0 0 0 0","staticPressurePa":"1 -1 -2 0 0 0 0",
+        "U2":"0 2 -2 0 0 0 0","yPlus":"0 0 0 0 0 0 0","phi":"0 3 -1 0 0 0 0","Uf":"0 1 -1 0 0 0 0"}
+    primary=[];rows=[];scans=[];internal_faces=None
+    require(all((directory/name).is_file() for name in ("p","U","k","omega","nut")),"Actual500 teaching native fields, including turbulent viscosity, are required.")
+    for path in sorted(directory.iterdir(),key=lambda p:p.name):
+        require(not path.is_symlink() and not getattr(path,"is_junction",lambda:False)(),"Actual teaching endpoint fields cannot be links.")
+        if path.is_dir():
+            require(path.name in {"uniform","polyMesh"},"Unrecognized teaching endpoint state directory.");continue
+        name=path.name;raw,row=record(output,"impeller-case/500/"+name)
+        text=re.sub(r"/\*.*?\*/|//[^\n]*","",raw.decode("ascii"),flags=re.S)
+        require(not re.search(r"(?m)^\s*#|\bcodeStream\b|\bcodeExecute\b|\b(?:nan|inf|infinity)\b",text,re.I),"Teaching endpoint values must be finite plain ASCII.")
+        if name in {"p","U","k","omega"}:
+            scans.append(scientific.finite_field(raw,name,cells));primary.append({"name":name,"bytes":row["bytes"],"sha256":row["sha256"]})
+        else:
+            vector=name=="Uf";surface=name in {"phi","Uf"};kind="surfaceVectorField" if vector else "surfaceScalarField" if surface else "volScalarField"
+            expected_dimension=dimensions.get(name)
+            native_dimensions=re.findall(r"\bdimensions\s*\[([^\[\]]*)\]\s*;",text)
+            require(expected_dimension is not None and re.search(r"\bformat\s+ascii\s*;",text)
+                and re.search(r"\bobject\s+"+re.escape(name)+r"\s*;",text) and re.search(r"\bclass\s+"+kind+r"\s*;",text)
+                and len(native_dimensions)==1 and (" ".join(native_dimensions[0].split())==expected_dimension or name=="yPlus" and not native_dimensions[0].strip()),
+                "The teaching endpoint has an unsupported native role or SI dimensions.")
+            match=re.search(r"\binternalField\s+(uniform\s+([^;]+)|nonuniform\s+List<(scalar|vector)>\s+(\d+)\s*\((.*?)\))\s*;",text,re.S)
+            require(match,"A complete actual teaching endpoint internal field is required.")
+            count=1 if match[2] is not None else int(match[4]);values=match[2] if match[2] is not None else match[5]
+            if match[2] is None:
+                if surface and internal_faces is None:internal_faces=base.native_list(output/"impeller-case/constant/polyMesh/neighbour")[0]
+                require(match[3]==("vector" if vector else "scalar") and count==(internal_faces if surface else cells),"Every actual teaching endpoint field must cover its native cells or internal faces.")
+            if vector:
+                triples=re.findall(r"\(([^()]*)\)",values)
+                require(len(triples)==count and not re.sub(r"\([^()]*\)","",values).strip() and all(len(v.split())==3 for v in triples),"Every actual Uf value must be one complete native velocity vector.")
+                tokens=[token for triple in triples for token in triple.split()]
+            else:tokens=values.split()
+            require(len(tokens)==count*(3 if vector else 1) and all(re.fullmatch(scientific.FLOAT,v) and math.isfinite(float(v)) for v in tokens),"Every actual teaching endpoint value must be finite.")
+            if name in {"nut","U2","yPlus"}:require(all(float(v)>=0 for v in tokens),"Turbulent viscosity, squared speed and yPlus cannot be negative.")
+            scans.append({"name":name,"internalValueCount":len(tokens),"finiteValuesVerified":True})
+        rows.append(row)
+    return primary,rows,scans
 
 
 def near_points_evidence(output,*,case_relative="impeller-case",log_relative="logs/02-checkMesh.log",

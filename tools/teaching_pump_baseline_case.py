@@ -35,6 +35,15 @@ FALSE_FLAGS = ("commandExecutionPerformedByThisTool","simulationExecuted","actua
     "restartVerified","manufacturerPublishedGeometry","originalFluentGeometryReproduced","baselineFieldsCopied","mainApplicationWrites")
 LIMITS = {"maximumSeconds":1200,"maximumCpus":1,"maximumMemoryBytes":4*1024**3,"maximumWorkspaceBytes":MAX_WORKSPACE,
     "maximumFileBytes":MAX_FILE,"maximumReportBytes":MAX_REPORT,"maximumLogBytes":4*1024**2,"maximumSourceRecords":MAX_SOURCE_RECORDS}
+NUMERICAL_PROFILE = {"id":"teaching-upwind-stabilization-v1","convection":"bounded Gauss upwind for U, k and omega",
+    "convectiveOrder":1,"pressureLinearTolerance":1e-8,"pressureRelativeTolerance":0.,"pressureMaximumIterations":100,
+    "transportLinearTolerance":1e-7,"transportRelativeTolerance":.01,"transportMinimumIterations":1,"transportMaximumIterations":100,
+    "pressureRelaxation":.2,"transportRelaxation":.3,"steadyIterationCount":500,
+    "basis":"A predeclared first-order numerical stabilization trial after run38190272870 retained large negative-k bounding and unconverged pressure/continuity; no physical BC or operating input is changed.",
+    "accuracyQualified":False,"convergencePredicted":False,"priorRejectedRunId":"38190272870",
+    "sources":["https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/interpolation/surfaceInterpolation/limitedSchemes/upwind/upwind.H",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/finiteVolume/convectionSchemes/boundedConvectionScheme/boundedConvectionScheme.C",
+        "https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/MomentumTransportModels/momentumTransportModels/Base/kOmegaSST/kOmegaSSTBase.C"]}
 ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,"muPaS":.001002,"gMS2":9.81,
     "speedRpm":1450.,"massFlowKgS":90.,"volumetricFlowM3S":90/998.2,"temperatureK":293.15,"vapourPressurePa":2339.,
     "axis":[0,0,1],"originM":[0,0,0],"solverGravityMS2":[0,0,0],"gravityInSolver":False,
@@ -43,12 +52,13 @@ ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,
     "inletTurbulence":{"kM2S2":.375,"omegaSInverse":100.,"basis":"Prescribed classroom initial/section values; not measured."},
     "headDatum":"Declared common zero inlet/outlet section reference with native gravity neglected; actual section centroid elevations are not measured or verified.",
     "wallAdaptation":"Blade, impeller-hub and impeller-shroud use rotating MRFnoSlip; intake and volute walls use stationary noSlip. Inlet pressureInletOutletVelocity and intake noSlip impose actual stationary BCs; Foundation12 does not use a nonRotatingPatches MRF keyword.",
+    "numericalStabilization":NUMERICAL_PROFILE,
     "geometryBasis":"New authored CAD, exact current exported mesh and matched initial interface; not official Ansys/Grundfos geometry or measured pump performance."}
 SAMPLING = {"flowUnits":"m3/s outward positive","weighting":"signed-outward-phi","velocityFrame":"absolute",
     "kineticMoment":"mean(U_absolute_squared)","pressureUnit":"Pa","pressureBasis":"absolute",
     "totalPressureField":"998.2*pKinematic + 0.5*998.2*mean(U_absolute_squared) + 300000",
     "staticPressureField":"998.2*pKinematic; add300000Pa exactly once in reduction","iterationIndexIsPhysicalTime":False}
-CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD. Geometry acceptance does not supply flow/head/convergence. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
+CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind stabilization trial. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
 encoded,record,json_file = geometry_case.encoded,geometry_case.record,geometry_case.json_file
 
 
@@ -147,6 +157,15 @@ def validate_source(directory):
 def case_files(component,*,default_faces=True):
     require(component in geometry_case.COMPONENTS and type(default_faces) is bool,"Use an exact component and actual optional empty defaultFaces declaration.")
     result={p:text.encode("ascii") for p,text in physics.case_files(component,300000).items()}
+    # Change only this authored lane's numerical controls. The pure original
+    # recipe, physical BCs, prescribed flow and initial fields remain separate.
+    for variable,scheme in (("U","limitedLinearV 1"),("k","limitedLinear 1"),("omega","limitedLinear 1")):
+        previous=("div(phi,"+variable+") bounded Gauss "+scheme+";").encode("ascii")
+        require(result["system/fvSchemes"].count(previous)==1,"Require the reviewed original numerical recipe before this explicit stabilization override.")
+        result["system/fvSchemes"]=result["system/fvSchemes"].replace(previous,("div(phi,"+variable+") bounded Gauss upwind;").encode("ascii"))
+    result["system/fvSolution"]=(base.foam_header("fvSolution")
+        + 'solvers {p {solver GAMG; tolerance 1e-8; relTol 0; smoother GaussSeidel; maxIter 100;} "(U|k|omega)" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-7; relTol 0.01; minIter 1; maxIter 100;}}\n'
+        + 'SIMPLE {nNonOrthogonalCorrectors 2;}\nrelaxationFactors {fields {p 0.2;} equations {U 0.3; k 0.3; omega 0.3;}}\n').encode("ascii")
     # Foundation12 wallDist reads fvSchemes.wallDist when SST requests distance.
     # This new authored lane supplies the native method; old routes are unchanged.
     require(not re.search(rb"\bwallDist\s*\{",result["system/fvSchemes"]),"The reviewed baseline recipe must define wallDist exactly once.")

@@ -831,3 +831,67 @@ components. It also removes the unused `nonRotatingPatches` MRF keyword;
 the existing intake `noSlip` and inlet `pressureInletOutletVelocity` conditions
 determine their stationary velocity basis. A new actual native run is required;
 this configuration correction does not establish convergence or pump head.
+
+The subsequent actual run
+[38190272870](https://github.com/simcalc/PyAnsys/actions/runs/38190272870)
+passed 789 tests and reached native iteration 500 with a normal `End`. Its
+endpoint inventory exposed two native writer roles: dimensionless `yPlus`
+uses `dimensions []`, and MRF writes the interpolated face velocity `Uf`.
+The teaching reader checks those exact roles, SI dimensions, all actual cell
+or internal-face values and unchanged raw file hashes. The legacy source
+reader is unchanged. This compatibility correction does not qualify the
+solution: its pressure, velocity, residual and continuity evidence shows
+nonphysical, unconverged flow.
+
+The next authored numerical trial uses bounded first-order upwind transport,
+lower pressure/momentum/turbulence relaxation and a tighter linear pressure
+solve. Geometry, operating inputs, physical boundary conditions, the 500
+iterations and numerical acceptance thresholds are unchanged. This is a
+declared stabilization trial; it does not establish spatial accuracy or allow
+negative absolute pressure to become an accepted single-phase baseline.
+
+### Conditional active cavitation reference
+
+The manual `Authored classroom pump active cavitation reference` workflow
+repeats fresh authored CAD, native mesh/interface checks and the numerically
+accepted single-phase SST/MRF prerequisite in the same run. Only that accepted
+case supplies its immutable mesh and provenance to a new liquid-initialized
+Schnerr-Sauer calculation. It copies no solution fields or single-phase H0.
+
+This separate reference uses 300000 Pa absolute inlet total pressure, the same
+water and flow/RPM assumptions, and fixed MRF. Native `p_rgh` and `p` are in Pa;
+declared zero gravity gives `p = p_rgh` without atmospheric addition. The
+maximum time step is one rotation period divided by 360; four periods are a
+declared relaxation trial, not proof of stationarity or physical blade motion.
+Actual signed-flow, pressure, kinetic moment, global vapour/pressure extrema,
+continuity, Courant and residual histories must independently qualify H0.
+
+Each native phase trial is limited to one CPU, 4 GiB, 1200 seconds and one GiB
+of retained workspace. Startup scalar results and NCC addressing are validated
+as generated data, separately from immutable authored model inputs. Complete
+raw logs, fields, samplers, input/runtime identities and numerical diagnostics
+are retained even on failure. Neither preparation, successful contract tests,
+nor native completion alone establishes phase-reference acceptance. Pressure
+sweep, NPSHr, moving-rotor transient, refinement and restart remain separate
+research stages requiring their own actual evidence.
+
+### Conditional pressure points and NPSH3 reduction
+
+The manual `Authored classroom pump pressure only cavitation point` workflow accepts
+an explicit successful active-reference run ID, its exact source commit and
+one absolute inlet total pressure. It imports the whole GitHub archive only
+after metadata, size, SHA256, CRC and every member role are checked. The
+installed Foundation 12 binaries then independently replay the current H0
+acceptance before a fresh pressure case is authored. Only inlet pressure may
+change; the mesh, flow, RPM, fluid, turbulence, phase model and numerical
+controls retain their declared bindings. Source solution fields are not reused.
+
+Raw native completion and numerical pressure-point acceptance remain separate.
+The offline sweep reducer uses actual qualified liquid-suction points and the
+actual active high-pressure reference. It reports a conditional NPSH3 only when
+those measured heads bracket `H/H0 = 0.97`; interpolation stays inside that
+bracket. A suction section at or below vapour pressure is excluded from this
+dependent comparison while its independent numerical facts remain available.
+A broad bracket does not establish pressure-resolution independence, physical
+validation, mesh/time convergence or restart. These workflows and contract tests
+do not themselves prove that any pressure sweep has been executed.

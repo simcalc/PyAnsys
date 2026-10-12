@@ -212,6 +212,70 @@ class TeachingBindingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):runner.near_points_evidence(root)
 
 
+class TeachingEndpointTests(unittest.TestCase):
+    def fixture(self,root,*,yplus_dimensions=""):
+        """Tiny ASCII field-shape fixtures, not solver or pump evidence."""
+        folder=root/"impeller-case/500";folder.mkdir(parents=True)
+        def field(name,kind,dims,values):
+            raw=("FoamFile {version 2.0; format ascii; class "+kind+"; object "+name+";}\n"
+                "dimensions ["+dims+"];\ninternalField "+values+";\nboundaryField {}\n").encode("ascii")
+            (folder/name).write_bytes(raw);return raw
+        for name,dims in (("p","0 2 -2 0 0 0 0"),("k","0 2 -2 0 0 0 0"),("omega","0 0 -1 0 0 0 0"),("nut","0 2 -1 0 0 0 0")):
+            field(name,"volScalarField",dims,"nonuniform List<scalar> 2 (1 2)")
+        field("U","volVectorField","0 1 -1 0 0 0 0","nonuniform List<vector> 2 ((1 0 0)(0 1 0))")
+        field("yPlus","volScalarField",yplus_dimensions,"uniform 0")
+        field("Uf","surfaceVectorField","0 1 -1 0 0 0 0","nonuniform List<vector> 2 ((1 0 0)(0 1 0))")
+        field("phi","surfaceScalarField","0 3 -1 0 0 0 0","nonuniform List<scalar> 2 (1 2)")
+        mesh=root/"impeller-case/constant/polyMesh";mesh.mkdir(parents=True)
+        (mesh/"neighbour").write_bytes(b"FoamFile {version 2.0; format ascii; class labelList; object neighbour;}\n2 (0 1)\n")
+        return folder
+
+    def test_observed_empty_dimensionless_and_native_surface_vectors_preserve_bytes(self):
+        for dims in ("","0 0 0 0 0 0 0"):
+            with self.subTest(dimensions=dims),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);folder=self.fixture(root,yplus_dimensions=dims)
+                original={path.name:path.read_bytes() for path in folder.iterdir()}
+                primary,rows,scans=runner.final_fields(root,2)
+                self.assertEqual({row["name"] for row in primary},{"p","U","k","omega"})
+                self.assertEqual(len(rows),8);self.assertEqual(len(scans),8)
+                self.assertEqual(next(s for s in scans if s["name"]=="Uf")["internalValueCount"],6)
+                self.assertEqual(next(s for s in scans if s["name"]=="yPlus")["internalValueCount"],1)
+                for row in rows:
+                    raw=original[Path(row["path"]).name]
+                    self.assertEqual(row["sha256"],sha256(raw).hexdigest());self.assertEqual(row["bytes"],len(raw))
+                    self.assertEqual((root/row["path"]).read_bytes(),raw)
+
+    def test_dimensionless_extension_is_only_the_observed_yplus_role(self):
+        for name,old,new in (("nut",b"[0 2 -1 0 0 0 0]",b"[]"),("yPlus",b"[]",b"[0 1 0 0 0 0 0]"),
+                             ("Uf",b"[0 1 -1 0 0 0 0]",b"[]")):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);folder=self.fixture(root);path=folder/name;path.write_bytes(path.read_bytes().replace(old,new))
+                with self.assertRaisesRegex(ValueError,"role or SI dimensions"):runner.final_fields(root,2)
+
+    def test_surface_velocity_requires_current_internal_face_count_and_complete_finite_vectors(self):
+        changes=((b"List<vector> 2",b"List<vector> 3"),(b"(1 0 0)",b"(1 0)"),
+                 (b"(1 0 0)",b"(1e500 0 0)"),(b"surfaceVectorField",b"volVectorField"),
+                 (b"List<vector>",b"List<scalar>"))
+        for old,new in changes:
+            with self.subTest(change=new),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);path=self.fixture(root)/"Uf";path.write_bytes(path.read_bytes().replace(old,new))
+                with self.assertRaises(ValueError):runner.final_fields(root,2)
+
+    def test_unrecognized_role_and_negative_turbulence_remain_rejected(self):
+        for name,old,new in (("unknown",None,None),("k",b"(1 2)",b"(-1 2)"),("yPlus",b"uniform 0",b"uniform -1")):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);folder=self.fixture(root)
+                if old is None:(folder/name).write_bytes((folder/"yPlus").read_bytes())
+                else:(folder/name).write_bytes((folder/name).read_bytes().replace(old,new))
+                with self.assertRaises(ValueError):runner.final_fields(root,2)
+
+    def test_legacy_original_endpoint_reader_retains_its_existing_scope(self):
+        import run_frozen_rotor_original as legacy
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);folder=self.fixture(root);(folder/"Uf").unlink()
+            with self.assertRaisesRegex(ValueError,"unsupported native role or SI dimensions"):legacy.final_fields(root,2)
+
+
 class SyntheticTeachingCampaignTests(unittest.TestCase):
     def campaign(self,root,*,failed_stage=None,missing_fields=False,mutate=None,bad_mesh=False,bad_log=False):
         """Every native/scientific reader is mocked; no CAD/mesh/flow executes."""
