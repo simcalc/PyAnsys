@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -151,6 +152,61 @@ def final_fields(output,cells):
     return endpoint.final_fields(Path(output),cells)
 
 
+def near_points_evidence(output,*,case_relative="impeller-case",log_relative="logs/02-checkMesh.log",
+                         authored_report_relative="source-teaching/source-geometry/teaching-geometry.json"):
+    """Bind the exact native near-point diagnostic to duplicated NCC labels.
+
+    A native Mesh OK may still report coincident points on disjoint NCC sides.
+    VTK float coordinates are a diagnostic projection, never an exact geometry
+    replacement; the actual native pointSet and face labels provide identity.
+    """
+    import frozen_rotor_native_quality as parser
+    vtk_path=case_relative+"/postProcessing/checkMesh/constant/nearPoints.vtk"
+    set_path=case_relative+"/constant/polyMesh/sets/nearPoints"
+    vtk_file,set_file,log_file=(Path(output)/path for path in (vtk_path,set_path,log_relative))
+    log,log_record=record(output,log_relative,LIMITS["maximumLogBytes"]) if log_file.exists() else (b"",None)
+    text=log.decode("utf-8")
+    vtk_exists=vtk_file.exists() or vtk_file.is_symlink();set_exists=set_file.exists() or set_file.is_symlink()
+    if not vtk_exists and not set_exists and not re.search(r"Writing \d+ near .*points to set nearPoints",text):return {"files":[],"evidence":None}
+    require(vtk_exists and set_exists and log_record is not None,"A native nearPoints log/set/VTK diagnostic must be retained completely.")
+    vtk,vtk_record=record(output,vtk_path)
+    geometry.native_geometry.completed_log(text)
+    require("Mesh OK." in text,"A nearPoints diagnostic cannot qualify an unsuccessful native mesh.")
+    counts=re.findall(r"Writing ([1-9][0-9]*) near \(closer than ([^\s]+) apart\) points to set nearPoints",text)
+    require(len(counts)==1 and math.isfinite(float(counts[0][1])) and float(counts[0][1])>0,"Retain one actual nearPoints count and threshold from the native checkMesh log.")
+    count=int(counts[0][0]);report_raw,report_record=record(output,authored_report_relative,LIMITS["maximumReportBytes"])
+    report=json.loads(report_raw)
+    shared=report.get("commonInterfaceEvidence",{}).get("sharedNodeCount")
+    require(report.get("schemaVersion")=="untirta.teaching-pump-geometry.v1" and report.get("provenance")=="CLASSROOM_AUTHORED_GEOMETRY" and report.get("units")=="SI"
+        and type(shared) is int and 0<shared<=500000 and count==2*shared,"The supported nearPoints diagnostic must match both exact authored shared-interface point inventories.")
+    np,_=base.native_list(Path(output)/case_relative/"constant/polyMesh/points")
+    set_raw,set_record=record(output,set_path)
+    labels=parser.labels(parser.native_body(set_raw,"nearPoints",{"pointSet"}),np,expected=count)
+    patches=geometry.native_geometry.boundary_entries(Path(output)/case_relative/"constant/polyMesh/boundary")
+    intervals={name:(patches[name]["startFace"],patches[name]["startFace"]+patches[name]["nFaces"])
+        for name in ("interface-impeller-outlet","interface-volute-inlet")}
+    _,body=base.native_list(Path(output)/case_relative/"constant/polyMesh/faces");points={name:set() for name in intervals}
+    for index,face in enumerate(re.finditer(r"(\d+)\s*\(([^()]*)\)",body)):
+        for name,(first,last) in intervals.items():
+            if first<=index<last:
+                values=face[2].split();require(len(values)==int(face[1]) and all(re.fullmatch(r"\d+",v) for v in values),"Actual interface face labels must remain complete native integers.")
+                points[name].update(map(int,values))
+    rotor,stator=points.values()
+    require(len(rotor)==len(stator)==shared and not rotor&stator and labels==rotor|stator,"Native nearPoints must equal exactly the disjoint duplicated interface point labels.")
+    match=re.fullmatch(r"# vtk DataFile Version 2\.0\s+nearPoints\s+ASCII\s+DATASET POLYDATA\s+POINTS (\d+) float\s+(.*?)\s+VERTICES (\d+) (\d+)\s+(.*?)\s+POINT_DATA (\d+)\s+FIELD attributes 1\s+pointID 1 (\d+) float\s+(.*?)\s*",vtk.decode("ascii"),re.S)
+    require(match and all(int(match[i])==count for i in (1,3,6,7)) and int(match[4])==2*count,"The native ASCII nearPoints VTK count and field roles must match the actual pointSet and log.")
+    coordinates=match[2].split();vertices=match[5].split();ids=match[8].split()
+    require(len(coordinates)==3*count and all(re.fullmatch(scientific.FLOAT,v) and math.isfinite(float(v)) for v in coordinates)
+        and len(vertices)==2*count and all(vertices[2*i]=="1" and vertices[2*i+1]==str(i) for i in range(count))
+        and len(ids)==count and all(re.fullmatch(r"\d+",v) for v in ids) and {int(v) for v in ids}==labels,
+        "Every native nearPoints VTK coordinate, vertex index and actual pointID must be complete and finite.")
+    evidence={"nativeNearPointCount":count,"sharedInterfaceNodeCountPerSide":shared,"countEquation":"N_near=2*N_shared_interface",
+        "nativeNearDistanceThresholdM":float(counts[0][1]),"nativePointSetEqualsDuplicatedInterfaceLabels":True,
+        "vtkCoordinatePrecisionDefinesGeometry":False,"nativeCheckMeshLog":log_record,"authoredGeometryReport":report_record,
+        "claimBoundary":"Retained native diagnostic for coincident points on disjoint matched NCC sides; no points are welded, removed or moved, and no mesh/numerical criterion is relaxed."}
+    return {"files":[vtk_record,set_record],"evidence":evidence}
+
+
 def postprocessing_records(output):
     """Separate native checkMesh coverage diagnostics from solver sample tables.
 
@@ -166,6 +222,8 @@ def postprocessing_records(output):
         if path.is_file():
             relative=path.relative_to(output).as_posix()
             if path.suffix==".dat":rows.append(record(output,relative,LIMITS["maximumLogBytes"])[1])
+            elif relative=="impeller-case/postProcessing/checkMesh/constant/nearPoints.vtk":
+                near_points_evidence(output)
             else:
                 require(re.fullmatch(r"impeller-case/postProcessing/checkMesh/0/(?:interface-impeller-outlet|interface-volute-inlet)_coverage\.vtk",relative),
                     "Only solver sampling tables and the exact initial NCC coverage diagnostic VTK roles may be retained.")
@@ -235,6 +293,7 @@ def run(geometry_native_directory,output_directory):
                     and measured["mergedPointCount"]==sum(row["nodeCount"] for row in expected.values()),"The merged native case must retain both admitted component counts.")
                 report.update(mergedNativeMeshEvidence=measured,nativeMeshQuality=quality,nativeGeometryQualityVerified=True,
                     physicalWallTypesVerified=True,coupledInterfaceCoverageVerified=True,nativeNccDiagnosticRecords=ncc_diagnostic_records(output))
+                near=near_points_evidence(output);report.update(nativeCheckMeshDiagnosticRecords=near["files"],nativeNearPointsEvidence=near["evidence"])
             elif current=="foamRun":
                 history=scientific.parse_solver_log(text);require(max(history)==500,"Actual steady native output must reach the500 authored outer iterations.")
                 report["nativeSolverCompleted"]=True;workspace_size(output)
@@ -249,6 +308,8 @@ def run(geometry_native_directory,output_directory):
         require(all(record(output,row["path"])[1]==row for row in report["finalNativeFieldRecords"])
             and all(record(output,row["path"],LIMITS["maximumLogBytes"])[1]==row for row in report["nativeSamplingRecords"]),"Actual endpoint/sample bytes changed during final verification.")
         require(ncc_diagnostic_records(output)==report["nativeNccDiagnosticRecords"],"An actual initial NCC coverage diagnostic changed or appeared after its native checkMesh binding.")
+        near=near_points_evidence(output)
+        require(near["files"]==report["nativeCheckMeshDiagnosticRecords"] and near["evidence"]==report["nativeNearPointsEvidence"],"An actual source-bound nearPoints diagnostic changed after native checkMesh binding.")
         preparation.verify_output(output,after_native_ncc=True);original=preparation.validate_source(source)
         require(original["sourceFileRecords"]==[{**row,"path":row["path"].removeprefix("source-teaching/")}
             for row in prepared["sourceEvidenceFileRecords"]],"The original geometry source inventory changed after its immutable copy was bound.")

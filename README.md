@@ -810,3 +810,13 @@ conservation, stationary head/flow and noncavitating pressure criteria.
 Native completion and numerical acceptance are separate. Numerical acceptance
 on this mesh cannot qualify wall resolution, mesh/time convergence, physical
 validation, active-phase H0, cavitation/NPSHr, moving-rotor transient or restart.
+
+The first fresh baseline run
+[38187978639](https://github.com/simcalc/PyAnsys/actions/runs/38187978639)
+passed all geometry gates and 784 tests, then stopped before `foamRun` because
+its diagnostic inventory omitted native `checkMesh/constant/nearPoints.vtk`.
+The retained native point set contains exactly 3278 labels: the two disjoint
+1639-node sides of the matched interface. The corrected reader binds the log,
+source count, actual interface face labels, point set and VTK point IDs as
+separate diagnostic evidence. Unknown VTK roles and inconsistent counts remain
+rejected. No mesh-quality or numerical acceptance threshold changes.

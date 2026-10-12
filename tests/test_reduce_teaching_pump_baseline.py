@@ -242,5 +242,27 @@ class TeachingBaselineReduction(unittest.TestCase):
             result = tool.reduce_baseline(root); self.assertFalse(result["actualCfdRunVerified"])
             self.assertIn("NCC_DIAGNOSTIC_INVENTORY", str(result["diagnostics"]))
 
+    def test_verified_near_points_diagnostic_is_separate_bound_native_evidence(self):
+        import run_teaching_pump_baseline as runner
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root)
+            rows = [self.write(root, "impeller-case/postProcessing/checkMesh/constant/nearPoints.vtk",
+                               b"SYNTHETIC-DATA-ROLE-NOT-NATIVE-VTK"),
+                    self.write(root, "impeller-case/constant/polyMesh/sets/nearPoints",
+                               b"SYNTHETIC-DATA-ROLE-NOT-NATIVE-POINTSET")]
+            proof = {"files": rows, "evidence": {"fixtureKind": "MOCKED-GEOMETRY-ONLY-NOT-RESEARCH"}}
+            # The runner's own focused tests verify full native label/VTK/source
+            # semantics. Here only that heavy geometry proof is mocked; current
+            # bytes, raw report linkage and aggregate evidence remain real.
+            with patch.object(runner, "near_points_evidence", return_value=proof):
+                value, _ = tool.record(root, tool.EXECUTION_FILE)
+                value.update(nativeCheckMeshDiagnosticRecords=rows, nativeNearPointsEvidence=proof["evidence"])
+                self.update_execution(root, value); result = tool.reduce_baseline(root)
+                self.assertTrue(result["numericalBaselineQualified"], result["diagnostics"])
+                self.assertTrue(all(row in result["nativeEvidenceRecords"] for row in rows))
+                value["nativeCheckMeshDiagnosticRecords"] = []; self.update_execution(root, value)
+                result = tool.reduce_baseline(root); self.assertFalse(result["actualCfdRunVerified"])
+                self.assertIn("NEAR_POINTS_DIAGNOSTIC", str(result["diagnostics"]))
+
 
 if __name__ == "__main__": unittest.main()

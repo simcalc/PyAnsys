@@ -15,6 +15,23 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools"))
 import run_teaching_pump_baseline as runner
 
 
+def near_points_fixture(root,*,case="impeller-case",log="logs/02-checkMesh.log",source="source-teaching/source-geometry/teaching-geometry.json"):
+    """Six synthetic duplicate NCC point labels; never actual pump/native proof."""
+    def native(name,kind,body):return ("FoamFile {version 2.0; format ascii; class "+kind+"; object "+name+";}\n"+body+"\n").encode()
+    mesh=root/case/"constant/polyMesh";(mesh/"sets").mkdir(parents=True,exist_ok=True)
+    (mesh/"points").write_bytes(native("points","vectorField","6\n((1 0 0)(1 1 0)(1 0 1)(1 0 0)(1 1 0)(1 0 1))"))
+    (mesh/"faces").write_bytes(native("faces","faceList","2\n(3(0 1 2)3(3 4 5))"))
+    (mesh/"boundary").write_bytes(native("boundary","polyBoundaryMesh","2\n(interface-impeller-outlet {type patch; nFaces 1; startFace 0;}\ninterface-volute-inlet {type patch; nFaces 1; startFace 1;})"))
+    (mesh/"sets/nearPoints").write_bytes(native("nearPoints","pointSet","6\n(0 1 2 3 4 5)"))
+    log_path=root/log;log_path.parent.mkdir(parents=True,exist_ok=True)
+    log_path.write_bytes(b"Build : 12-86e126a7bc4d\n <<Writing 6 near (closer than 1e-6 apart) points to set nearPoints\nMesh OK.\nEnd\n")
+    source_path=root/source;source_path.parent.mkdir(parents=True,exist_ok=True)
+    source_path.write_text(json.dumps({"schemaVersion":"untirta.teaching-pump-geometry.v1","provenance":"CLASSROOM_AUTHORED_GEOMETRY","units":"SI","commonInterfaceEvidence":{"sharedNodeCount":3}}))
+    vtk=root/case/"postProcessing/checkMesh/constant/nearPoints.vtk";vtk.parent.mkdir(parents=True,exist_ok=True)
+    vtk.write_bytes(b"# vtk DataFile Version 2.0\nnearPoints\nASCII\nDATASET POLYDATA\nPOINTS 6 float\n1 0 0 1 1 0 1 0 1 1 0 0 1 1 0 1 0 1\nVERTICES 6 12\n1 0 1 1 1 2 1 3 1 4 1 5\nPOINT_DATA 6\nFIELD attributes 1\npointID 1 6 float\n0 1 2 3 4 5\n")
+    return vtk
+
+
 class Process:
     pid=123456
     class Stream:
@@ -157,6 +174,39 @@ class TeachingBindingTests(unittest.TestCase):
             self.assertNotEqual(runner.ncc_diagnostic_records(root),diagnostics)
             (folder/"unrecognized_coverage.vtk").write_bytes(b"never-accept")
             with self.assertRaisesRegex(ValueError,"exact initial NCC"):runner.sampling_records(root)
+
+    def test_near_points_native_diagnostic_matches_exact_duplicate_ncc_labels(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);near_points_fixture(root)
+            result=runner.near_points_evidence(root)
+            self.assertEqual(len(result["files"]),2)
+            self.assertEqual(result["evidence"]["nativeNearPointCount"],6)
+            self.assertEqual(result["evidence"]["sharedInterfaceNodeCountPerSide"],3)
+            self.assertTrue(result["evidence"]["nativePointSetEqualsDuplicatedInterfaceLabels"])
+            self.assertFalse(result["evidence"]["vtkCoordinatePrecisionDefinesGeometry"])
+            self.assertEqual(runner.postprocessing_records(root),([],[]))
+
+    def test_bad_near_point_counts_ids_source_or_nonfinite_vtk_are_rejected(self):
+        for change in ("log-count","source-count","vtk-count","duplicate-set","shared-interface","nonfinite-vtk","vtk-ids"):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);vtk=near_points_fixture(root);mesh=root/"impeller-case/constant/polyMesh"
+                if change=="log-count":path=root/"logs/02-checkMesh.log";path.write_bytes(path.read_bytes().replace(b"Writing 6 near",b"Writing 5 near"))
+                elif change=="source-count":path=root/"source-teaching/source-geometry/teaching-geometry.json";path.write_bytes(path.read_bytes().replace(b'"sharedNodeCount": 3',b'"sharedNodeCount": 4'))
+                elif change=="vtk-count":vtk.write_bytes(vtk.read_bytes().replace(b"POINTS 6 float",b"POINTS 5 float"))
+                elif change=="duplicate-set":path=mesh/"sets/nearPoints";path.write_bytes(path.read_bytes().replace(b"0 1 2 3 4 5",b"0 1 2 3 4 4"))
+                elif change=="shared-interface":path=mesh/"faces";path.write_bytes(path.read_bytes().replace(b"3(3 4 5)",b"3(0 4 5)"))
+                elif change=="nonfinite-vtk":vtk.write_bytes(vtk.read_bytes().replace(b"1 0 0 1 1",b"nan 0 0 1 1"))
+                else:vtk.write_bytes(vtk.read_bytes().replace(b"\n0 1 2 3 4 5\n",b"\n0 1 2 3 4 4\n"))
+                with self.assertRaises(ValueError):runner.near_points_evidence(root)
+
+    def test_reported_near_point_diagnostic_cannot_be_omitted_partially(self):
+        for remove in ("vtk","set","log","both"):
+            with self.subTest(remove=remove),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);vtk=near_points_fixture(root)
+                if remove in ("vtk","both"):vtk.unlink()
+                if remove in ("set","both"):(root/"impeller-case/constant/polyMesh/sets/nearPoints").unlink()
+                if remove=="log":(root/"logs/02-checkMesh.log").unlink()
+                with self.assertRaises(ValueError):runner.near_points_evidence(root)
 
 
 class SyntheticTeachingCampaignTests(unittest.TestCase):

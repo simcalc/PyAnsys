@@ -257,6 +257,14 @@ def execution_evidence(root, manifest, records):
         actual = read(root, row["path"], native.MAX_FIELD)[1]
         require(actual == row, "TEACHING_CURRENT_NCC_DIAGNOSTIC_BYTES_REQUIRED")
         equations.add_record(records, actual)
+    near = runner.near_points_evidence(root)
+    require(execution.get("nativeCheckMeshDiagnosticRecords", []) == near["files"]
+            and execution.get("nativeNearPointsEvidence") == near["evidence"],
+            "TEACHING_COMPLETE_CURRENT_NEAR_POINTS_DIAGNOSTIC_REQUIRED")
+    for row in near["files"]:
+        actual = read(root, row["path"], native.MAX_FIELD)[1]
+        require(actual == row, "TEACHING_CURRENT_NEAR_POINTS_DIAGNOSTIC_BYTES_REQUIRED")
+        equations.add_record(records, actual)
     return execution, logs, mesh, fields
 
 
