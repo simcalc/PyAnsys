@@ -65,7 +65,9 @@ class SlidingRecipeTests(unittest.TestCase):
         for p in case.base.INTERFACES:self.assertEqual(bc[p]['type'],'movingWallSlipVelocity')
         for p in case.base.STATIONARY:self.assertEqual(bc[p]['type'],'noSlip')
         self.assertEqual(bc['inlet']['type'],'pressureInletOutletVelocity')
-        self.assertEqual(bc['mass-flow-inlet-11']['type'],'flowRateOutletVelocity')
+        self.assertEqual(bc['mass-flow-inlet-11']['type'],'fixedValue')
+        _,source_bc=case.phase.baseline_case.fields.boundary_blocks(fixed['0/U'],'U')
+        self.assertEqual(bc['mass-flow-inlet-11'],source_bc['mass-flow-inlet-11'])
         self.assertIn(b'internalField uniform 300000;',moving['0/p_rgh']);self.assertIn(b'p0 uniform 300000;',moving['0/p_rgh'])
 
     def test_five_writes_clock_is_explicit_short_pilot_never_time_convergence(self):
@@ -89,6 +91,21 @@ class SlidingRecipeTests(unittest.TestCase):
 
 class SlidingPreparationTests(unittest.TestCase):
     def fixture(self,root):return source_fixture(root)
+
+    def test_motion_preserves_the_bound_uniform_outlet_without_inheriting_flow_results(self):
+        with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'RUNNER_TEMP':temp}):
+            root=Path(temp);source,verify=self.fixture(root)
+            with patch.object(case,'verify_reference',side_effect=verify):
+                prepared=case.prepare(source,root/'pilot')
+                expected=case.phase.outlet.prefix_evidence(verify(source)['preparation']['outletProfileEvidence'],'source-reference')
+                self.assertEqual(prepared['outletProfileEvidence'],expected)
+                self.assertFalse(prepared['outletProfileEvidence']['profile']['profileMeasured'])
+                _,before=case.phase.baseline_case.fields.boundary_blocks((source/'case/0/U').read_bytes(),'U')
+                _,after=case.phase.baseline_case.fields.boundary_blocks((root/'pilot/case/0/U').read_bytes(),'U')
+                self.assertEqual(after['mass-flow-inlet-11'],before['mass-flow-inlet-11'])
+                changed=deepcopy(prepared);changed['outletProfileEvidence']['profile']['uniformVelocityMS'][0]=1
+                (root/'pilot'/case.REPORT).write_bytes(case.encoded(changed))
+                with self.assertRaises(ValueError):case.verify_output(root/'pilot')
 
     def test_full_current_reference_and_mesh_copy_replay_with_false_pilot_flags(self):
         with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'RUNNER_TEMP':temp}):

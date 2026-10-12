@@ -1,5 +1,6 @@
 """Synthetic byte/topology contracts only; no native CAD/CFD is executed."""
 from collections import defaultdict
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -15,6 +16,18 @@ import teaching_pump_baseline_case as case
 import teaching_pump_native_case as native_case
 import run_teaching_pump_geometry as producer
 from test_teaching_pump_native_case import source_fixture
+
+
+def synthetic_outlet_proof(root,**kwargs):
+    """Miniature topology fixture is NOT the authored rectangle/native evidence.
+
+    Only the independent geometric profile proof is mocked here. Its complete
+    parser/math/mutation gates are exercised in test_teaching_pump_outlet_profile.
+    These recipe/copy/SHA tests confer no actual geometry or CFD qualification.
+    """
+    report,row=case.json_file(root,'source-geometry/teaching-geometry.json')
+    return {'schemaVersion':case.outlet.SCHEMA,'syntheticFixtureNotNativeEvidence':True,'profile':case.outlet.PROFILE,
+        'geometryReportFile':row,'nativeMeshFileRecords':[case.record(root,'component-mesh-snapshots/volute/constant/polyMesh/'+n)[1] for n in case.MESH_FILES]}
 
 
 def native_component(component,raw):
@@ -102,13 +115,18 @@ def native_source(root):
 
 
 class TeachingBaselineCaseTests(unittest.TestCase):
-    def environment(self,temp):return mock.patch.dict(os.environ,{'RUNNER_TEMP':temp})
+    @contextmanager
+    def environment(self,temp):
+        with mock.patch.dict(os.environ,{'RUNNER_TEMP':temp}),mock.patch.object(case.outlet,'verify_outlet',side_effect=synthetic_outlet_proof):
+            yield
 
     def test_pure_physics_has_explicit_fixed_operating_pressure_and_stationary_intake(self):
         files=case.case_files('impeller');self.assertIn(b'pRef 300000;',files['system/controlDict']);self.assertNotIn(b'pRef 101325;',files['system/controlDict'])
         self.assertNotIn(b'nonRotatingPatches',files['constant/MRFProperties'])
         _,walls=case.fields.boundary_blocks(files['0/U'],'U')
         self.assertEqual(walls['inlet']['type'],'pressureInletOutletVelocity')
+        self.assertEqual(walls['mass-flow-inlet-11']['type'],'fixedValue')
+        self.assertEqual(walls['mass-flow-inlet-11']['value'],'uniform (0 18.786550564837889 0)')
         self.assertEqual(walls['inblock-hub']['type'],'noSlip');self.assertEqual(walls['inblock-shroud']['type'],'noSlip')
         for patch in ('blade','impeller-hub','impeller-shroud'):self.assertEqual(walls[patch]['type'],'MRFnoSlip')
         self.assertIn(b'omega 1450 [rpm];',files['constant/MRFProperties']);self.assertIn(b'fields true;',files['system/createNonConformalCouplesDict'])
@@ -126,14 +144,23 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             self.assertIn(b'endTime 500;',files['system/controlDict'])
         self.assertNotIn('wallDist',case.physics.case_files('impeller')['system/fvSchemes'])
 
-    def test_stabilization_changes_numerics_without_changing_physical_inputs_or_old_recipe(self):
+    def test_stabilization_and_one_explicit_outlet_candidate_keep_other_physics_and_old_recipe(self):
         for component in ('impeller','volute'):
             original={p:text.encode('ascii') for p,text in case.physics.case_files(component,300000).items()}
             before={p:sha256(raw).hexdigest() for p,raw in original.items()}
             fresh=case.case_files(component)
             self.assertEqual(set(fresh),set(original))
-            for path in set(original)-{'system/fvSchemes','system/fvSolution'}:
+            for path in set(original)-{'system/fvSchemes','system/fvSolution','0/U'}:
                 self.assertEqual(fresh[path],original[path],path)
+            # One reviewed boundary block changes; all other velocity roles,
+            # SI/internal state, pressure and immutable original helper remain.
+            old_prefix,old_bc=case.fields.boundary_blocks(original['0/U'],'U')
+            new_prefix,new_bc=case.fields.boundary_blocks(fresh['0/U'],'U')
+            self.assertEqual(old_prefix,new_prefix)
+            self.assertEqual({p:r for p,r in old_bc.items() if p!='mass-flow-inlet-11'},
+                {p:r for p,r in new_bc.items() if p!='mass-flow-inlet-11'})
+            self.assertEqual(old_bc['mass-flow-inlet-11']['type'],'flowRateOutletVelocity')
+            self.assertEqual(new_bc['mass-flow-inlet-11']['type'],'fixedValue')
             self.assertEqual(before,{p:sha256(text.encode('ascii')).hexdigest() for p,text in case.physics.case_files(component,300000).items()})
             self.assertIn(b'div(phi,U) bounded Gauss upwind;',fresh['system/fvSchemes'])
             self.assertIn(b'div(phi,k) bounded Gauss upwind;',fresh['system/fvSchemes'])
@@ -186,6 +213,8 @@ class TeachingBaselineCaseTests(unittest.TestCase):
                 self.assertTrue(all(prepared[k] is False for k in case.FALSE_FLAGS));self.assertEqual(len(prepared['initialCaseMeshFiles']),12)
                 self.assertFalse(prepared['baselineFieldsCopied']);self.assertTrue(prepared['sourceNativeGeometryQualityVerified'])
                 self.assertEqual(prepared['classroomAssumptions']['numericalStabilization'],case.NUMERICAL_PROFILE)
+                self.assertEqual(prepared['classroomAssumptions']['outletVelocityProfile'],case.outlet.PROFILE)
+                self.assertTrue(all(r['path'].startswith('source-teaching/') for r in prepared['outletProfileEvidence']['nativeMeshFileRecords']))
                 (output/'impeller-case/constant/MRFProperties').write_bytes(b'MUTATED')
                 with self.assertRaises(case.BaselineCaseIssue):case.verify_output(output)
 
@@ -235,7 +264,7 @@ class TeachingBaselineCaseTests(unittest.TestCase):
                 for folder in ('impeller-case','volute-case'):
                     path=output/folder/'0/nut';raw=path.read_bytes().replace(b'"defaultFaces"\n    {\n        type calculated; value uniform 0;',b'"defaultFaces"\n    {\n        type calculated; value nonuniform List<scalar> 0();');path.write_bytes(raw)
                 case.verify_output(output,after_native_ncc=True)
-                path=output/'impeller-case/0/U';raw=path.read_bytes();path.write_bytes(raw.replace(b'type flowRateOutletVelocity;',b'type zeroGradient;'))
+                path=output/'impeller-case/0/U';raw=path.read_bytes();path.write_bytes(raw.replace(case.outlet.uniform_outlet_body(),b'type zeroGradient;'))
                 with self.assertRaises(case.BaselineCaseIssue):case.verify_output(output,after_native_ncc=True)
 
     def test_native_function1_and_sst_defaults_preserve_exact_physics(self):
@@ -244,13 +273,26 @@ class TeachingBaselineCaseTests(unittest.TestCase):
             with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),mock.patch.object(case,'validate_runtime'):
                 output=root/'baseline';case.prepare(source,output)
                 for folder in ('impeller-case','volute-case'):
-                    path=output/folder/'0/U';raw=path.read_bytes();q=format(90/998.2,'.17g').encode()
-                    path.write_bytes(raw.replace(b'volumetricFlowRate '+q+b';',b'volumetricFlowRate {type constant; value '+q+b';}'))
+                    # Native fixedValue serializes this exact prescribed vector;
+                    # the rejected old outlet Function1 is no longer authored.
+                    path=output/folder/'0/U';raw=path.read_bytes();self.assertIn(case.outlet.uniform_outlet_body(),raw)
                     path=output/folder/'0/omega';raw=path.read_bytes();path.write_bytes(raw.replace(b'type omegaWallFunction;',b'type omegaWallFunction; beta1 0.075; blended false;'))
                     path=output/folder/'0/nut';raw=path.read_bytes();path.write_bytes(raw.replace(b'type nutkWallFunction;',b'type nutkWallFunction; Cmu 0.09; kappa 0.41; E 9.8;'))
                 case.verify_output(output,after_native_ncc=True)
-                path=output/'impeller-case/0/U';raw=path.read_bytes();path.write_bytes(raw.replace(b'value '+q+b';}',b'value 1;}'))
+                path=output/'impeller-case/0/U';raw=path.read_bytes();path.write_bytes(raw.replace(case.outlet.uniform_outlet_body(),b'type fixedValue; value uniform (0 1 0);'))
                 with self.assertRaises(case.BaselineCaseIssue):case.verify_output(output,after_native_ncc=True)
+
+    def test_outlet_geometry_admission_and_bound_evidence_cannot_be_skipped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source,geometry_module=self.fixture(root)
+            with self.environment(temp),mock.patch.dict(sys.modules,{'teaching_pump_geometry':geometry_module}),mock.patch.object(case,'validate_runtime'):
+                with mock.patch.object(case.outlet,'verify_outlet',side_effect=ValueError('Actual outlet normal mismatched')):
+                    with self.assertRaisesRegex(ValueError,'normal mismatched'):case.prepare(source,root/'baseline')
+                self.assertFalse((root/'baseline').exists())
+                output=root/'baseline';case.prepare(source,output)
+                packet=json.loads((output/case.REPORT).read_bytes());packet['outletProfileEvidence']['nativeMeshFileRecords'][0]['sha256']='0'*64
+                (output/case.REPORT).write_bytes(case.encoded(packet))
+                with self.assertRaises(case.BaselineCaseIssue):case.verify_output(output)
 
 
 if __name__=='__main__':unittest.main()

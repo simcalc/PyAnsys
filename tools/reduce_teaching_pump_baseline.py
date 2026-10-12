@@ -282,6 +282,168 @@ def execution_evidence(root, manifest, records):
     return execution, logs, mesh, fields
 
 
+def independent_native_diagnostics(execution_directory, *, study=None, manifest=None, logs=None, records=None):
+    """Read independent current metrics without granting native/source acceptance.
+
+    In particular, a negative head does not remove the available global liquid
+    domain or interface observations. This data projection may inspect a retained
+    rejected run; it never substitutes for installed-runtime/source admission.
+    """
+    root = native.case_tool.regular_directory(execution_directory)
+    bound = {} if records is None else records
+    local_records = {}
+    window = list(range(481, 501))
+    output = {"schemaVersion": "untirta.teaching-pump-independent-native-diagnostics.v1",
+        "samplingIterationWindow": [481, 500], "iterationIndexIsPhysicalTime": False,
+        "actualCfdRunVerified": False, "simulationExecuted": False, "numericalBaselineQualified": False,
+        "qualifiedBaseline": False, "installedRuntimeReverified": False,
+        "mainApplicationWrites": False, "branches": {}, "diagnostics": [],
+        "claimBoundary": "Current byte-bound native metric projection only; source, runtime, head and baseline qualification remain separate."}
+
+    def bind_row(row):
+        equations.add_record(local_records, row)
+        equations.add_record(bound, row)
+
+    def bound_record(path):
+        value, row = record(root, path)
+        bind_row(row)
+        return value
+
+    current_study = bound_record(STUDY_FILE)
+    current_manifest = bound_record(MANIFEST_FILE)
+    require((study is None or study == current_study) and (manifest is None or manifest == current_manifest)
+            and current_study.get("schemaVersion") == STUDY_SCHEMA
+            and current_manifest.get("schemaVersion") == MANIFEST_SCHEMA
+            and current_manifest.get("sourceGeometryRoute") == ROUTE
+            and current_study.get("sourceReference", {}).get("kind") == "classroom-authored-SI-pump-CAD"
+            and current_manifest.get("studyInputs") == current_study.get("input"),
+            "TEACHING_CURRENT_DIAGNOSTIC_STUDY_BINDING_REQUIRED")
+    study, manifest = current_study, current_manifest
+    execution = bound_record(EXECUTION_FILE)
+    require(execution.get("schemaVersion") == EXECUTION_SCHEMA
+            and execution.get("inputManifestSha256") == bound[MANIFEST_FILE]["sha256"]
+            and execution.get("studySha256") == bound[STUDY_FILE]["sha256"],
+            "TEACHING_CURRENT_DIAGNOSTIC_PREEXECUTION_BINDING_REQUIRED")
+
+    def bind_data(row, key):
+        rows = execution.get(key)
+        require(isinstance(rows, list) and len([r for r in rows if r.get("path") == row["path"]]) == 1
+                and next(r for r in rows if r.get("path") == row["path"]) == row,
+                "TEACHING_CURRENT_DIAGNOSTIC_NATIVE_DATA_BINDING_REQUIRED")
+        bind_row(row)
+
+    def native_units(path, name, kind, dimensions, *, input_field=False):
+        raw, row = read(root, path, native.MAX_FIELD)
+        text = re.sub(r"/\*.*?\*/|//[^\n]*", "", raw.decode("ascii"), flags=re.S)
+        require(len(re.findall(r"\bdimensions\b", text)) == 1
+                and re.search(r"\bdimensions\s*\[\s*" + dimensions + r"\s*\]\s*;", text)
+                and re.search(r"\bformat\s+ascii\s*;", text)
+                and re.search(r"\bclass\s+" + kind + r"\s*;", text)
+                and re.search(r"\bobject\s+" + name + r"\s*;", text),
+                "TEACHING_CURRENT_DIAGNOSTIC_NATIVE_SI_FIELD_REQUIRED")
+        if input_field:
+            rows = manifest.get("files", [])
+            expected = [r for r in rows if r.get("path") == path]
+            require(len(expected) == 1 and row == {k: expected[0][k] for k in ("path", "bytes", "sha256")},
+                    "TEACHING_CURRENT_DIAGNOSTIC_NATIVE_INPUT_BYTES_REQUIRED")
+            bind_row(row)
+        else:
+            bind_data(row, "finalNativeFieldRecords")
+
+    def current_log(program, path):
+        raw, row = read(root, path)
+        text = raw.decode("utf-8")
+        stages = execution.get("stages", [])
+        stage = [s for s in stages if s.get("program") == program]
+        require(len(stage) == 1 and stage[0].get("log") == PurePosixPath(path).name
+                and stage[0].get("logBytes") == row["bytes"] and stage[0].get("logSha256") == row["sha256"]
+                and (logs is None or logs.get(program) == text),
+                "TEACHING_CURRENT_DIAGNOSTIC_NATIVE_LOG_BINDING_REQUIRED")
+        bind_row(row)
+        return text
+
+    def attempt(name, function):
+        try:
+            result = function()
+            result.update(evidenceAvailable=True, status="CurrentSuppliedNativeMetric")
+            output["branches"][name] = result
+            if not result["criterionSatisfied"]:
+                output["diagnostics"].append({"branch": name, "reasonCode": result["reasonCode"]})
+        except (protocol.ProtocolError, OSError, ValueError, KeyError, TypeError, UnicodeError, StopIteration) as error:
+            output["branches"][name] = {"evidenceAvailable": False, "criterionSatisfied": False,
+                "status": "DiagnosticRequired", "reasonCode": str(error)[:500]}
+            output["diagnostics"].append({"branch": name, "reasonCode": str(error)[:500]})
+
+    def pressure_domain():
+        native_units("impeller-case/0/p", "p", "volScalarField", "0 2 -2 0 0 0 0", input_field=True)
+        rho = protocol.number(study["input"]["densityKgM3"], positive=True)
+        pv = protocol.number(study["input"]["vaporPressurePa"], positive=True)
+        pressure = protocol.number(manifest["pressureLevelAbsolutePa"], positive=True)
+        require(rho == 998.2 and pv == 2339.0 and pressure == PRESSURE,
+                "TEACHING_DECLARED_DIAGNOSTIC_ABSOLUTE_PRESSURE_BASIS_REQUIRED")
+        table, row = native.sampler(root, "globalPressureMinimum", "volFieldValue.dat", ("min(p)",))
+        bind_data(row, "nativeSamplingRecords")
+        require(all(i in table for i in window), "CFD_GLOBAL_PRESSURE_WINDOW_REQUIRED")
+        values = [protocol.number(rho*table[i][0] + pressure) for i in window]
+        minimum = min(values)
+        return {"criterionSatisfied": minimum > pv, "reasonCode": "CFD_NONCAVITATING_BASELINE_REQUIRED",
+            "pressureDomainStatus": "SinglePhaseLiquidDomainSatisfied" if minimum > pv else "FLASHING_CAVITATION_RISK",
+            "minimumStaticPressureAbsolutePa": minimum, "vapourPressurePa": pv,
+            "minimumPressureHistoryAbsolutePa": values,
+            "stage": protocol.stage({"rhoKgM3": rho, "nativeMinimumPressureHistoryM2S2": [table[i][0] for i in window],
+                "explicitAbsolutePressureReferencePa": pressure, "vapourPressurePa": pv},
+                "p_min_absolute = min(rho*p_min_kinematic + p_reference); liquid domain requires p_min_absolute > p_v",
+                f"min({rho}*p_min_kinematic + {pressure}) = {minimum}; {minimum} > {pv}", minimum, "Pa")}
+
+    def coverage():
+        values = native.parse_coverage(current_log("checkMesh", "logs/02-checkMesh.log") + "\n" +
+            current_log("foamRun", "logs/03-foamRun.log"))
+        limits = equations.ACCEPTANCE
+        passed = all(v[0] >= limits["interfaceMinimumCoverage"] and v[1] >= limits["interfaceAverageCoverage"]
+            and v[2] <= limits["interfaceMaximumCoverage"] for row in values for v in row.values())
+        return {"criterionSatisfied": passed, "reasonCode": "CFD_NCC_INTERFACE_COVERAGE_NOT_SATISFIED",
+            "nativeCoupledCoverage": values, "criteria": {k: limits[k] for k in
+                ("interfaceMinimumCoverage", "interfaceAverageCoverage", "interfaceMaximumCoverage")},
+            "equation": "For every source/target record: minimum >= 0.99, average >= 0.999, maximum <= 1.01",
+            "unit": "dimensionless"}
+
+    def interface_flux():
+        native_units("impeller-case/500/phi", "phi", "surfaceScalarField", "0 3 -1 0 0 0 0")
+        tables = []
+        for name, patch in zip(("flowRotorInterface", "flowStatorInterface"), native.COUPLED_PATCHES):
+            table, row = native.sampler(root, name, "surfaceFieldValue.dat", ("sum(phi)",), patch)
+            bind_data(row, "nativeSamplingRecords")
+            require(all(i in table for i in window), "CFD_SNAPPY_COMPLETE_CURRENT_SECTION_WINDOW_REQUIRED:" + name)
+            tables.append(table)
+        rotor, stator = ([table[i][0] for i in window] for table in tables)
+        differences = [abs(a+b)/max(abs(a), abs(b), 1e-30) for a, b in zip(rotor, stator)]
+        mismatch = max(differences)
+        limit = equations.ACCEPTANCE["interfaceFluxRelativeLimit"]
+        signs = all(a > 0 > b for a, b in zip(rotor, stator))
+        return {"criterionSatisfied": signs and mismatch <= limit,
+            "reasonCode": "CFD_ACTUAL_INTERFACE_FLUX_CONSERVATION_REQUIRED", "outwardFluxSignsSatisfied": signs,
+            "rotorOutwardVolumeFlowHistoryM3S": rotor, "statorOutwardVolumeFlowHistoryM3S": stator,
+            "maximumInterfaceFluxRelativeMismatch": mismatch, "relativeMismatchLimit": limit,
+            "stage": protocol.stage({"rotorOutwardVolumeFlowHistoryM3S": rotor, "statorOutwardVolumeFlowHistoryM3S": stator,
+                "denominatorFloorM3S": 1e-30, "relativeLimit": limit},
+                "epsilon_interface = max(abs(Q_rotor + Q_stator)/max(abs(Q_rotor), abs(Q_stator), 1e-30)); Q_rotor > 0 > Q_stator",
+                f"max(abs(Q_rotor + Q_stator)/max(abs(Q_rotor), abs(Q_stator), 1e-30)) = {mismatch}; limit = {limit}",
+                mismatch, "dimensionless")}
+
+    attempt("globalPressureDomain", pressure_domain)
+    attempt("interfaceCoverage", coverage)
+    attempt("interfaceFluxConservation", interface_flux)
+    # This remains mandatory even when a metric branch caught a missing file or
+    # failed criterion; no prior valid byte is silently carried forward.
+    require(all(read(root, row["path"], native.MAX_FIELD)[1] == row for row in bound.values()),
+            "TEACHING_EVIDENCE_CHANGED_DURING_REDUCTION")
+    output["allIndependentCriteriaSatisfied"] = all(r["criterionSatisfied"] for r in output["branches"].values())
+    output["currentEvidenceVerified"] = True
+    output["nativeEvidenceRecords"] = sorted(local_records.values(), key=lambda r: r["path"])
+    output["nativeEvidenceSha256"] = sha256(encoded(output["nativeEvidenceRecords"])).hexdigest()
+    return output
+
+
 def reduce_baseline(execution_directory):
     output = {"schemaVersion": SCHEMA, "sourceGeometryRoute": ROUTE, "status": "ActualNativeEvidenceRequired",
         **{k: False for k in FALSE_CLAIMS}, "preliminaryBaselineQualified": False, "actualCfdRunVerified": False,
@@ -305,10 +467,26 @@ def reduce_baseline(execution_directory):
         execution, logs, mesh, fields = execution_evidence(root, manifest, records)
         output.update(actualCfdRunVerified=True, simulationExecuted=True, finiteNativeFields=fields,
                       status="ActualNativeExecutionVerifiedNumericalAcceptanceRequired")
+        output["independentDiagnostics"] = independent_native_diagnostics(root, study=study, manifest=manifest,
+            logs=logs, records=records)
+        output["diagnostics"].extend(output["independentDiagnostics"]["diagnostics"])
+        pressure_branch = output["independentDiagnostics"]["branches"]["globalPressureDomain"]
+        if pressure_branch["evidenceAvailable"]:
+            output["minimumStaticPressureAbsolutePa"] = pressure_branch["minimumStaticPressureAbsolutePa"]
+        coverage_branch = output["independentDiagnostics"]["branches"]["interfaceCoverage"]
+        if coverage_branch["evidenceAvailable"]:
+            output["nativeCoupledCoverage"] = coverage_branch["nativeCoupledCoverage"]
+        flux_branch = output["independentDiagnostics"]["branches"]["interfaceFluxConservation"]
+        if flux_branch["evidenceAvailable"]:
+            output["interfaceFluxRelativeMismatch"] = flux_branch["maximumInterfaceFluxRelativeMismatch"]
         # This shared function reads only native tables/logs and applies the
         # unchanged head/NPSHA/conservation/residual/pressure/NCC equations. It
         # does not run its old source, schema or study admission constructors.
-        equations.numerical_observation(root, output, manifest, study, execution, logs, mesh, records)
+        try:
+            equations.numerical_observation(root, output, manifest, study, execution, logs, mesh, records)
+        finally:
+            require(all(read(root, row["path"], native.MAX_FIELD)[1] == row for row in records.values()),
+                    "TEACHING_EVIDENCE_CHANGED_DURING_REDUCTION")
         output["qualifiedBaseline"] = False
         output["status"] = "AuthoredNumericalBaselineQualified" if output["numericalBaselineQualified"] else "NumericalAcceptanceRequired"
         require(all(read(root, row["path"], native.MAX_FIELD)[1] == row for row in records.values()), "TEACHING_EVIDENCE_CHANGED_DURING_REDUCTION")
@@ -318,6 +496,13 @@ def reduce_baseline(execution_directory):
         if output["actualCfdRunVerified"]: output["status"] = "NumericalAcceptanceRequired"
         if str(error) == "TEACHING_EVIDENCE_CHANGED_DURING_REDUCTION":
             output.update(actualCfdRunVerified=False, simulationExecuted=False, status="NativeEvidenceChangedDuringReduction")
+            if "independentDiagnostics" in output:
+                independent = output["independentDiagnostics"]
+                independent.update(currentEvidenceVerified=False, allIndependentCriteriaSatisfied=False)
+                for branch in independent["branches"].values():
+                    branch.update(evidenceAvailable=False, criterionSatisfied=False, status="NativeEvidenceChangedDuringReduction")
+                for name in ("minimumStaticPressureAbsolutePa", "nativeCoupledCoverage", "interfaceFluxRelativeMismatch"):
+                    output.pop(name, None)
     output["nativeEvidenceRecords"] = sorted(records.values(), key=lambda r: r["path"])
     return output
 

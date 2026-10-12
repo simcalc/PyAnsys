@@ -42,6 +42,11 @@ field/table/log binding, reducer equations and source-copy checks remain real.
         return {"report": report, "reportFile": row, "components": report["components"]}
     stack.enter_context(patch.object(case.baseline_case, "verify_output", side_effect=checked))
     stack.enter_context(patch.object(case.baseline, "binary_identity"))
+    # This miniature producer lacks the full discharge CAD/snapshot. The
+    # dedicated profile suite verifies that geometry; only upstream proof is
+    # mocked here while current source/physics/math/copy checks remain real.
+    stack.enter_context(patch.object(case.outlet, "verify_outlet",
+        side_effect=lambda root, **_: case.json_file(root, case.baseline.PREPARATION_FILE)[0]["outletProfileEvidence"]))
     return stack
 
 
@@ -63,6 +68,9 @@ def fixture(root, *, default_faces=True):
             "nodeCount": len(data[name]["points"]), "patchFaces": {p: len(rows) for p, rows in data[name]["patches"].items()},
             "cellZone": "rotating-fluid" if name == "impeller" else "stationary-fluid"})
     prep, _ = case.json_file(source, case.baseline.PREPARATION_FILE); prep["components"] = components
+    prep["outletProfileEvidence"] = {"profile": deepcopy(case.outlet.PROFILE),
+        "geometryReportFile": case.read(source, "source-teaching/source-geometry/teaching-input-manifest.json")[1],
+        "nativeMeshFileRecords": [], "fixtureKind": "SYNTHETIC-UPSTREAM-OUTLET-GEOMETRY-PROOF-ONLY"}
     prep_row = save(source, case.baseline.PREPARATION_FILE, prep)
     bound = case.baseline.build_manifest(source)
     packet_rows = {}
@@ -133,6 +141,10 @@ class TeachingPhaseCaseTests(unittest.TestCase):
         self.assertNotIn(b"nonRotatingPatches", authored["constant/MRFProperties"])
         _, walls = case.baseline_case.fields.boundary_blocks(authored['0/U'], 'U')
         self.assertEqual(walls['inlet']['type'], 'pressureInletOutletVelocity')
+        self.assertEqual(walls['mass-flow-inlet-11']['type'], 'fixedValue')
+        self.assertEqual(walls['mass-flow-inlet-11']['value'],
+            'uniform (0 ' + format(90 / 998.2 / (.04363 * (.12 - .01)), '.17g') + ' 0)')
+        self.assertNotIn(b'flowRateOutletVelocity', authored['0/U'])
         self.assertEqual(walls['inblock-hub']['type'], 'noSlip'); self.assertEqual(walls['inblock-shroud']['type'], 'noSlip')
         for wall in ('blade', 'impeller-hub', 'impeller-shroud'): self.assertEqual(walls[wall]['type'], 'MRFnoSlip')
         self.assertIn(b"omega 1450 [rpm];", authored["constant/MRFProperties"])
@@ -233,13 +245,15 @@ class TeachingPhaseCaseTests(unittest.TestCase):
                 elif kind == "old-reference": study["sourceReference"]["kind"] = "official-educational-example"
                 else: study["input"][{"rpm": "speedRpm", "density": "densityKgM3", "datum": "suctionDatumM"}[kind]] += 1
                 with self.assertRaises(ValueError): case.native_recipe(study)
-        for kind in ("double-pressure", "missing-wall", "model", "reference", "source", "mesh", "new-p", "dynamic", "extra-dictionary"):
+        for kind in ("double-pressure", "missing-wall", "outlet-profile", "model", "reference", "source", "mesh", "new-p", "dynamic", "extra-dictionary"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp, self.context(temp):
                 root = Path(temp); source = fixture(root); output = root / "phase"; case.prepare(source, output)
                 if kind == "double-pressure":
                     path = output / "case/0/p_rgh"; path.write_bytes(path.read_bytes().replace(b"300000", b"600000"))
                 elif kind == "missing-wall":
                     path = output / "case/0/U"; path.write_bytes(re.sub(rb'    "blade"\s*\{[^{}]*\}', b"", path.read_bytes()))
+                elif kind == "outlet-profile":
+                    value, _ = case.json_file(output, case.REPORT); value["outletProfileEvidence"]["profile"]["fixtureTamper"] = True; save(output, case.REPORT, value)
                 elif kind == "model":
                     path = output / "case/constant/fvModels"; path.write_bytes(path.read_bytes().replace(b"SchnerrSauer", b"otherModel"))
                 elif kind == "reference":

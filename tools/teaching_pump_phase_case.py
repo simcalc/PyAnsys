@@ -22,6 +22,7 @@ import frozen_rotor_cavitation_case as physics
 import frozen_rotor_research_protocol as protocol
 import teaching_pump_baseline_case as baseline_case
 import reduce_teaching_pump_baseline as baseline
+import teaching_pump_outlet_profile as outlet
 
 SCHEMA = "untirta.teaching-pump-phase-reference-preparation.v1"
 REPORT = "teaching-phase-preparation.json"
@@ -161,6 +162,11 @@ def verify_baseline(directory):
         and sha256(encoded([identity_row])).hexdigest() == study["controls"]["geometrySha256"],
         "Preserve the distinct canonical authored SI identity without manufacturer or old-source inheritance.")
     preparation, _ = json_file(root, baseline.PREPARATION_FILE)
+    outlet_proof = outlet.verify_outlet(root,
+        geometry_report_relative="source-teaching/source-geometry/teaching-geometry.json",
+        mesh_relative="source-teaching/component-mesh-snapshots/volute/constant/polyMesh")
+    require(preparation.get("outletProfileEvidence") == outlet_proof,
+        "Re-read the actual authored discharge rectangle and copied native mesh before preserving its declared uniform outlet profile.")
     components = preparation["components"]
     require([c["component"] for c in components] == ["impeller", "volute"], "Both ordered actual source components are required.")
     mesh = base.verify_merged_mesh(root / "impeller-case", components, root / "logs/02-checkMesh.log")
@@ -173,7 +179,8 @@ def verify_baseline(directory):
     return {"directory": root, "report": packet, "reportFile": packet_row, "packet": packet, "study": study,
         "manifest": manifest, "manifestFile": manifest_row, "geometryIdentity": identity, "geometryFile": identity_row,
         "sourceRecords": source_inventory(root), "meshRecords": mesh_rows, "components": components,
-        "coupledMeshEvidence": mesh, "defaultFacesPresent": default is not None}
+        "coupledMeshEvidence": mesh, "defaultFacesPresent": default is not None,
+        "outletProfileEvidence": outlet_proof}
 
 
 validate_source = verify_baseline
@@ -187,6 +194,14 @@ def native_recipe(study, *, default_faces=False):
     require(study.get("input") == inputs and study.get("physicalBasis") == expected["physicalBasis"]
         and study.get("sourceReference") == expected["sourceReference"], "Use only the exact authored SI classroom physical family.")
     authored = physics.native_recipe(study, PRESSURE_PA, "steady-sweep", MAX_DT_S, DEFAULT_DURATION_S)
+    velocity = authored["0/U"]
+    _, original_patches = baseline_case.fields.boundary_blocks(velocity.encode("ascii"), "U")
+    require(original_patches[outlet.PROFILE["patch"]]["type"] == "flowRateOutletVelocity",
+        "Begin with the exact reviewed outlet before declaring its controlled uniform-normal replacement.")
+    velocity, replaced = re.subn(r'("mass-flow-inlet-11"\s*\{)[^{}]*(\})',
+        lambda match: match[1] + "\n        " + outlet.uniform_outlet_body().decode("ascii") + "\n    " + match[2], velocity)
+    require(replaced == 1, "Replace exactly one physical outlet velocity block; retain suction pressure, flow, rotor and other patch inputs.")
+    authored["0/U"] = velocity
     require(not re.search(r"\bwallDist\s*\{", authored["system/fvSchemes"]), "The reviewed phase recipe must define wallDist exactly once.")
     authored["system/fvSchemes"] += "wallDist {method meshWave;}\n"
     authored["constant/MRFProperties"] = (base.foam_header("MRFProperties", location="constant")
@@ -244,6 +259,7 @@ def declared_report(source, output):
         "sourceBaselineEvidenceSha256": source["report"]["nativeObservation"]["nativeEvidence"]["sha256"],
         "sourceGeometryIdentityFile": source["geometryFile"], "sourceGeometryControlSha256": source["study"]["controls"]["geometrySha256"],
         "sourceNativeMeshFiles": source["meshRecords"], "preservedNativeMeshFiles": [{**row, "path": row["path"].removeprefix("impeller-case/")} for row in source["meshRecords"]],
+        "outletProfileEvidence": outlet.prefix_evidence(source["outletProfileEvidence"], "source-baseline"),
         "components": source["components"], "sourceCoupledMeshEvidence": source["coupledMeshEvidence"],
         "defaultFacesPresent": source["defaultFacesPresent"], "authoredInputFiles": rows,
         "authoredCavitationModelSha256": sha256(encoded(model_rows)).hexdigest(),

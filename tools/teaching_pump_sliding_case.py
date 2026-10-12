@@ -125,6 +125,7 @@ def declared_report(source,output):
         "sourceReferenceInputManifestSha256":source["manifestFile"]["sha256"],"sourceActivePhaseEvidenceSha256":source["packet"]["nativeObservation"]["nativeEvidence"]["sha256"],
         "sourceActivePhaseHeadM":source["packet"]["activePhaseReferenceHeadM"],"sourceReferencePressureAbsolutePa":300000.,
         "sourceGeometryIdentityFile":source["geometryFile"],"sourceGeometryControlSha256":source["study"]["controls"]["geometrySha256"],
+        "outletProfileEvidence":phase.outlet.prefix_evidence(source["preparation"]["outletProfileEvidence"],"source-reference"),
         "sourceNativeMeshFiles":source["coupledMeshFiles"],"preservedNativeMeshFiles":[{**r,"path":r["path"].removeprefix("case/")} for r in source["coupledMeshFiles"]],
         "components":source["components"],"defaultFacesPresent":source["defaultFacesPresent"],"authoredInputFiles":rows,
         "authoredCavitationModelSha256":sha256(encoded([r for r in rows if r["path"] in MODEL_FILES])).hexdigest(),

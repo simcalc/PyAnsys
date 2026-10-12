@@ -211,6 +211,7 @@ def prepare(reference_directory,output_directory,*,pressure_absolute_pa):
             "sourceReferenceInputManifestSha256":verified["manifestFile"]["sha256"],"sourceActivePhaseEvidenceSha256":verified["packet"]["nativeObservation"]["nativeEvidence"]["sha256"],
             "sourceActivePhaseHeadM":verified["packet"]["activePhaseReferenceHeadM"],"sourceReferencePressureAbsolutePa":verified["preparation"]["inletAbsoluteTotalPressurePa"],
             "sourceGeometryIdentityFile":verified["geometryFile"],"sourceNativeMeshFiles":verified["coupledMeshFiles"],"preservedNativeMeshFiles":mesh_rows,
+            "outletProfileEvidence":reference_case.outlet.prefix_evidence(verified["preparation"]["outletProfileEvidence"],"source-reference"),
             "authoredInputFiles":authored_rows,"authoredCavitationModelSha256":sha256(encoded(model)).hexdigest(),"defaultFacesPresent":verified["defaultFacesPresent"],
             "components":verified["components"],"declaredStudyInputs":verified["study"]["input"],"physicalBasis":verified["study"]["physicalBasis"],"sourceReference":verified["study"]["sourceReference"],
             "temporalPlan":reference_case.TEMPORAL_PLAN,"pressureAbsolutePa":pressure,"inletAbsoluteTotalPressurePa":pressure,"absolutePressureMapping":reference_case.ABSOLUTE_PRESSURE_MAPPING,
@@ -237,6 +238,7 @@ def verify_output(directory,*,after_native_execution=False):
         and report.get("sourceReferenceInputManifestSha256")==source["manifestFile"]["sha256"]
         and report.get("sourceActivePhaseEvidenceSha256")==source["packet"]["nativeObservation"]["nativeEvidence"]["sha256"]
         and report.get("sourceActivePhaseHeadM")==source["packet"]["activePhaseReferenceHeadM"] and report.get("sourceReferencePressureAbsolutePa")==source["preparation"]["inletAbsoluteTotalPressurePa"]
+        and report.get("outletProfileEvidence")==reference_case.outlet.prefix_evidence(source["preparation"]["outletProfileEvidence"],"source-reference")
         and report.get("sourceGeometryIdentityFile")==source["geometryFile"] and read(root,reference_runner.IDENTITY,MAX_REPORT)[1]==source["geometryFile"],"All source active H0/mesh/identity evidence must remain actual and bound.")
     require(report.get("components")==source["components"] and report.get("defaultFacesPresent")==source["defaultFacesPresent"] and report.get("sourceNativeMeshFiles")==source["coupledMeshFiles"]
         and report.get("declaredStudyInputs")==source["study"]["input"] and report.get("physicalBasis")==source["study"]["physicalBasis"] and report.get("sourceReference")==source["study"]["sourceReference"]

@@ -19,6 +19,7 @@ import teaching_pump_native_case as geometry_case
 import run_teaching_pump_geometry as geometry_runner
 import frozen_rotor_original_case as physics
 import frozen_rotor_snappy_baseline_case as fields
+import teaching_pump_outlet_profile as outlet
 
 base, safety, geometry = geometry_case.base, geometry_case.safety, geometry_case.native_geometry
 SCHEMA = "untirta.teaching-pump-baseline-preparation.v1"
@@ -53,12 +54,13 @@ ASSUMPTIONS = {"provenance":ROUTE,"coordinateUnits":"SI_METRES","rhoKgM3":998.2,
     "headDatum":"Declared common zero inlet/outlet section reference with native gravity neglected; actual section centroid elevations are not measured or verified.",
     "wallAdaptation":"Blade, impeller-hub and impeller-shroud use rotating MRFnoSlip; intake and volute walls use stationary noSlip. Inlet pressureInletOutletVelocity and intake noSlip impose actual stationary BCs; Foundation12 does not use a nonRotatingPatches MRF keyword.",
     "numericalStabilization":NUMERICAL_PROFILE,
+    "outletVelocityProfile":outlet.PROFILE,
     "geometryBasis":"New authored CAD, exact current exported mesh and matched initial interface; not official Ansys/Grundfos geometry or measured pump performance."}
 SAMPLING = {"flowUnits":"m3/s outward positive","weighting":"signed-outward-phi","velocityFrame":"absolute",
     "kineticMoment":"mean(U_absolute_squared)","pressureUnit":"Pa","pressureBasis":"absolute",
     "totalPressureField":"998.2*pKinematic + 0.5*998.2*mean(U_absolute_squared) + 300000",
     "staticPressureField":"998.2*pKinematic; add300000Pa exactly once in reduction","iterationIndexIsPhysicalTime":False}
-CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind stabilization trial. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
+CLAIM = "Fresh prescribed single-phase steady SST/MRF physics on independently accepted new classroom CAD, with an explicitly declared first-order upwind numerical trial and a uniform normal outlet profile assumption bound to every actual rectangular outlet facet. The outlet profile is not measured and does not predict convergence. Geometry acceptance and a numerical recipe do not supply flow/head/convergence or accuracy. No manufacturer performance, qualified baseline, phase H0, cavitation sweep, NPSHr, physical transient or numerical refinement is inherited."
 encoded,record,json_file = geometry_case.encoded,geometry_case.record,geometry_case.json_file
 
 
@@ -150,13 +152,20 @@ def validate_source(directory):
         "Actual current coupled mesh topology/quality and unchanged NCC coverage must reproduce.")
     rows=source_inventory(root);require(execution.get("workspaceBytes")==sum(row["bytes"] for row in rows if row["path"]!=geometry_runner.REPORT),
         "The measured native geometry workspace byte total must reproduce before its immutable execution report.")
+    outlet_proof=outlet.verify_outlet(root)
     return {"report":execution,"reportFile":execution_row,"preparation":prepared,"authoredGeometry":authored,"components":component_rows,
-        "sourceFileRecords":rows,"snapshots":snapshots,"mergedNativeMeshEvidence":merged,"nativeMeshQuality":quality}
+        "sourceFileRecords":rows,"snapshots":snapshots,"mergedNativeMeshEvidence":merged,"nativeMeshQuality":quality,"outletProfileEvidence":outlet_proof}
 
 
 def case_files(component,*,default_faces=True):
     require(component in geometry_case.COMPONENTS and type(default_faces) is bool,"Use an exact component and actual optional empty defaultFaces declaration.")
     result={p:text.encode("ascii") for p,text in physics.case_files(component,300000).items()}
+    # Prescribe the explicitly declared normal plug outlet. Actual cap geometry
+    # is independently re-read in validate_source BEFORE any fresh case writes.
+    q=re.escape(format(outlet.Q,".17g").encode("ascii"))
+    pattern=rb'("mass-flow-inlet-11"\s*\{)\s*type\s+flowRateOutletVelocity\s*;\s*volumetricFlowRate\s+'+q+rb'\s*;\s*value\s+uniform\s*\(0\s+0\s+0\)\s*;\s*\}'
+    result["0/U"],count=re.subn(pattern,lambda m:m[1]+b"\n        "+outlet.uniform_outlet_body()+b"\n    }",result["0/U"])
+    require(count==1,"Override only the exact reviewed prescribed-Q outlet block with the declared uniform normal candidate.")
     # Change only this authored lane's numerical controls. The pure original
     # recipe, physical BCs, prescribed flow and initial fields remain separate.
     for variable,scheme in (("U","limitedLinearV 1"),("k","limitedLinear 1"),("omega","limitedLinear 1")):
@@ -267,6 +276,7 @@ def prepare(geometry_native_directory,output_directory):
             "sourceComponentFiles":[{**r,"path":"source-teaching/"+r["path"]} for r in verified["snapshots"]],
             "initialCaseMeshFiles":mesh_rows,"authoredInputFiles":authored_rows,"authoredPhysicsFileRecords":retained,
             "components":verified["components"],"nativeCommandArguments":commands(output),"classroomAssumptions":ASSUMPTIONS,"sampling":SAMPLING,
+            "outletProfileEvidence":outlet.prefix_evidence(verified["outletProfileEvidence"],"source-teaching"),
             "sourceNativeGeometryQualityVerified":True,"sourceCoupledCoverageVerified":True,"sourceInputsImmutable":True,"limits":LIMITS,
             "claimBoundary":CLAIM,**{k:False for k in FALSE_FLAGS}}
         require(source_inventory(source)==verified["sourceFileRecords"],"Original geometry source changed before final preparation.")
@@ -288,6 +298,8 @@ def verify_output(directory,*,after_native_ncc=False):
         "sourceGeometryInputManifestSha256":verified["preparation"]["report"]["nativeInputManifestSha256"],"sourceAuthoredGeometryReportSha256":verified["authoredGeometry"]["reportFile"]["sha256"],
         "sourceGeometryIdentitySha256":verified["authoredGeometry"]["report"]["geometryIdentitySha256"]}
     require(all(report.get(k)==v for k,v in bindings.items()) and report.get("components")==verified["components"],"All current source geometry identities/components must remain bound.")
+    require(report.get("outletProfileEvidence")==outlet.prefix_evidence(verified["outletProfileEvidence"],"source-teaching"),
+        "Every current native outlet facet/normal/area and source CAD identity must replay before fixed-profile physics admission.")
     require(report.get("sourceEvidenceFileRecords")==[{**r,"path":"source-teaching/"+r["path"]} for r in verified["sourceFileRecords"]]
         and report.get("sourceComponentFiles")==[{**r,"path":"source-teaching/"+r["path"]} for r in verified["snapshots"]],"Full copied geometry evidence and immutable premerge snapshots must reproduce.")
     authored=authored_case_files(source,verified["components"]);expected_authored=[];expected_retained=[];expected_mesh=[]

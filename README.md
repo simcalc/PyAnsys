@@ -869,6 +869,42 @@ did not qualify that baseline. Run 38194626972 also retained a numerical
 rejection after the output-owner correction. Neither run supplies an active
 cavitation H0 or permits a dependent pressure point or physical rotor pilot.
 
+### Uniform outlet candidate after the rejected baseline
+
+The retained native fields localize the largest velocity and negative pressure
+to stator cells beside the discharge. All rotating-wall vectors match the
+declared `omega cross r`; the integrated outlet flow alone did not detect the
+concentrated velocity profile. The pinned Foundation 12
+[`flowRateOutletVelocity` implementation](https://github.com/OpenFOAM/OpenFOAM-12/blob/86e126a7bc4dbfaed949bbc58c9f0fdd67acc059/src/finiteVolume/fields/fvPatchFields/derived/flowRateOutletVelocity/flowRateOutletVelocityFvPatchVectorField.C)
+retains the extrapolated tangential velocity and rescales the clamped normal
+profile. This diagnosis does not establish that a replacement will converge.
+
+One new fresh candidate prescribes a uniform normal plug outlet. Python shows
+the complete input, equation, substitution and SI result: `Q = 90/998.2 m3/s`,
+`A = 0.04363*(0.12-0.01) = 0.0047993 m2`, and
+`U = (0, Q/A, 0) = (0, 18.786550564837889, 0) m/s`. Before authoring the case,
+the independent helper verifies every actual native discharge facet, its
+outward +Y normal, the authored rectangle, total area, perimeter and current
+geometry/mesh hashes. The native velocity condition changes to `fixedValue`;
+the outlet pressure remains `zeroGradient`. This is an explicit classroom
+boundary assumption, not a measured or developed outlet profile.
+
+Geometry, RPM, water, absolute suction pressure, numerical controls, iteration
+count and acceptance thresholds remain unchanged. No native field is clipped,
+no calculated pressure is offset, and no sign or acceptance limit is changed.
+The phase, pressure-point and moving-rotor adapters retain the same outlet
+profile and its full geometry proof; pressure points still change only inlet
+pressure. Their dependent execution requires a new accepted native baseline
+and then an accepted active-model high-pressure reference.
+
+The baseline reducer also retains independent global-pressure, interface
+coverage and interface-flux diagnostics before evaluating positive pump head.
+A failed head therefore does not hide valid independent measurements or a
+negative-pressure failure. Current raw file identities remain mandatory.
+Contract tests and this candidate definition do not qualify convergence,
+noncavitating H0, NPSHr, transient performance or physical accuracy. The actual
+fresh native run decides those prerequisite numerical results.
+
 ### Conditional active cavitation reference
 
 The manual `Authored classroom pump active cavitation reference` workflow

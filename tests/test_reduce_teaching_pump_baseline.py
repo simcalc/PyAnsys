@@ -78,9 +78,9 @@ class TeachingBaselineReduction(unittest.TestCase):
             row = self.write(root, f"logs/{i:02d}-{program}.log", solver if program == "foamRun" else mesh if program == "checkMesh" else prefix + "End\n")
             stages.append({"program": program, "exitCode": 0, "elapsedSeconds": 1,
                 "log": Path(row["path"]).name, "logBytes": row["bytes"], "logSha256": row["sha256"]})
-        dims = {"p": "0 2 -2 0 0 0 0", "U": "0 1 -1 0 0 0 0", "k": "0 2 -2 0 0 0 0", "omega": "0 0 -1 0 0 0 0", "nut": "0 2 -1 0 0 0 0"}
+        dims = {"p": "0 2 -2 0 0 0 0", "U": "0 1 -1 0 0 0 0", "k": "0 2 -2 0 0 0 0", "omega": "0 0 -1 0 0 0 0", "nut": "0 2 -1 0 0 0 0", "phi": "0 3 -1 0 0 0 0"}
         for name, dim in dims.items():
-            kind = "volVectorField" if name == "U" else "volScalarField"
+            kind = "volVectorField" if name == "U" else "surfaceScalarField" if name == "phi" else "volScalarField"
             value = "(1 2 3)" if name == "U" else "100" if name == "p" else "0" if name == "nut" else "1"
             self.write(root, "impeller-case/500/" + name, f"FoamFile {{format ascii; class {kind}; object {name};}}\ndimensions [{dim}];\ninternalField uniform {value};\nboundaryField {{}}\n")
         rho, q = 998.2, 90 / 998.2
@@ -306,6 +306,96 @@ class TeachingBaselineReduction(unittest.TestCase):
             self.write(root, "impeller-case/500/unknownField",
                 "FoamFile {format ascii; class volScalarField; object unknownField;}\ndimensions [];\ninternalField uniform 0;\nboundaryField {}\n")
             with self.assertRaises(ValueError): runner.final_fields(root, 2)
+
+    def test_negative_head_preserves_global_pressure_and_interface_branches(self):
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root, pressure_min=-400)
+            self.write(root, "impeller-case/postProcessing/weightedOutlet/0/surfaceFieldValue.dat",
+                self.table("mass-flow-inlet-11", tool.native.SAMPLERS["weightedOutlet"][1],
+                    [-100, tool.PRESSURE - 99820 + 998.2*9/2, 9]))
+            self.update_sample_inventory(root)
+            result = tool.reduce_baseline(root)
+            self.assertTrue(result["actualCfdRunVerified"])
+            self.assertFalse(result["numericalBaselineQualified"])
+            self.assertLess(result["stages"]["head"]["result"]["value"], 0)
+            branches = result["independentDiagnostics"]["branches"]
+            self.assertTrue(all(r["evidenceAvailable"] for r in branches.values()))
+            self.assertAlmostEqual(result["minimumStaticPressureAbsolutePa"], 998.2*-400 + 300000)
+            self.assertEqual(branches["globalPressureDomain"]["pressureDomainStatus"], "FLASHING_CAVITATION_RISK")
+            self.assertFalse(branches["globalPressureDomain"]["criterionSatisfied"])
+            self.assertTrue(branches["interfaceCoverage"]["criterionSatisfied"])
+            self.assertTrue(branches["interfaceFluxConservation"]["criterionSatisfied"])
+            self.assertAlmostEqual(result["interfaceFluxRelativeMismatch"], 0)
+            self.assertIn("CFD_POSITIVE_HEAD_LIQUID_BASELINE_REQUIRED", str(result["diagnostics"]))
+            self.assertIn("CFD_NONCAVITATING_BASELINE_REQUIRED", str(result["diagnostics"]))
+
+    def test_missing_independent_branch_does_not_erase_other_current_metrics(self):
+        for missing, branch in (("globalPressureMinimum", "globalPressureDomain"),
+                                ("flowRotorInterface", "interfaceFluxConservation")):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp, self.context():
+                root = Path(temp); self.fixture(root)
+                filename = "volFieldValue.dat" if missing == "globalPressureMinimum" else "surfaceFieldValue.dat"
+                (root / f"impeller-case/postProcessing/{missing}/0/{filename}").unlink()
+                self.update_sample_inventory(root)
+                result = tool.reduce_baseline(root)
+                branches = result["independentDiagnostics"]["branches"]
+                self.assertFalse(branches[branch]["evidenceAvailable"])
+                self.assertFalse(result["numericalBaselineQualified"])
+                for name, value in branches.items():
+                    if name != branch: self.assertTrue(value["evidenceAvailable"], name)
+                self.assertTrue(branches["interfaceCoverage"]["criterionSatisfied"])
+
+    def test_read_only_independent_projection_grants_no_native_runtime_waiver(self):
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root)
+            before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            with patch.object(tool, "binary_identity", side_effect=AssertionError("Not native runtime admission")), \
+                 patch.object(tool, "preparer", side_effect=AssertionError("Not source/recipe admission")):
+                result = tool.independent_native_diagnostics(root)
+            self.assertTrue(result["allIndependentCriteriaSatisfied"])
+            for key in ("actualCfdRunVerified", "simulationExecuted", "installedRuntimeReverified",
+                        "numericalBaselineQualified", "qualifiedBaseline", "mainApplicationWrites"):
+                self.assertFalse(result[key], key)
+            self.assertEqual(before, {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()})
+            self.assertEqual(result["nativeEvidenceSha256"], sha256(tool.encoded(result["nativeEvidenceRecords"])).hexdigest())
+
+    def test_independent_metric_bytes_are_rechecked_after_a_later_head_failure(self):
+        with tempfile.TemporaryDirectory() as temp, self.context():
+            root = Path(temp); self.fixture(root)
+            def changed(*args, **kwargs):
+                path = root / "impeller-case/postProcessing/globalPressureMinimum/0/volFieldValue.dat"
+                path.write_text(path.read_text().replace("481 10", "481 -400"), encoding="ascii")
+                raise tool.protocol.ProtocolError("CFD_POSITIVE_HEAD_LIQUID_BASELINE_REQUIRED")
+            with patch.object(tool.equations, "numerical_observation", side_effect=changed):
+                result = tool.reduce_baseline(root)
+            self.assertFalse(result["actualCfdRunVerified"])
+            self.assertFalse(result["simulationExecuted"])
+            self.assertFalse(result["numericalBaselineQualified"])
+            self.assertEqual(result["status"], "NativeEvidenceChangedDuringReduction")
+            self.assertIn("TEACHING_EVIDENCE_CHANGED_DURING_REDUCTION", str(result["diagnostics"]))
+            self.assertFalse(result["independentDiagnostics"]["currentEvidenceVerified"])
+            self.assertTrue(all(not r["evidenceAvailable"] for r in result["independentDiagnostics"]["branches"].values()))
+            self.assertNotIn("minimumStaticPressureAbsolutePa", result)
+
+    def test_native_metric_binding_and_si_pressure_inputs_are_not_guessed(self):
+        for mutation in ("table", "reference", "unit"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp, self.context():
+                root = Path(temp); self.fixture(root)
+                if mutation == "table":
+                    path = root / "impeller-case/postProcessing/globalPressureMinimum/0/volFieldValue.dat"
+                    path.write_text(path.read_text().replace("481 10", "481 -400"), encoding="ascii")
+                elif mutation == "reference":
+                    manifest, _ = tool.record(root, tool.MANIFEST_FILE); manifest["pressureLevelAbsolutePa"] = 600000
+                    row = self.json(root, tool.MANIFEST_FILE, manifest)
+                    execution, _ = tool.record(root, tool.EXECUTION_FILE); execution["inputManifestSha256"] = row["sha256"]
+                    self.update_execution(root, execution)
+                else:
+                    path = root / "impeller-case/0/p"; path.write_text(path.read_text().replace("0 2 -2", "1 -1 -2"), encoding="ascii")
+                result = tool.independent_native_diagnostics(root)
+                self.assertFalse(result["branches"]["globalPressureDomain"]["evidenceAvailable"])
+                self.assertTrue(result["branches"]["interfaceCoverage"]["evidenceAvailable"])
+                self.assertTrue(result["branches"]["interfaceFluxConservation"]["evidenceAvailable"])
+                self.assertFalse(result["actualCfdRunVerified"])
 
 
 if __name__ == "__main__": unittest.main()

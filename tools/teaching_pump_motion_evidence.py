@@ -83,12 +83,12 @@ def point_vectors(raw,*,location=None):
     body=native.native_body(raw,"points",{"vectorField"})
     match=re.fullmatch(r"(\d+)\s*\((.*)\)\s*;?",body,re.S)
     require(match and 0<int(match[1])<=MAX_POINTS,"Actual points need a complete bounded native vectorField count.")
-    values=[];last=0
-    for m in re.finditer(r"\(([^()]*)\)",match[2]):
-        require(not match[2][last:m.start()].strip(),"All native point-vector text must be accounted for.")
+    values=[];last=0;payload=match[2]
+    for m in re.finditer(r"\(([^()]*)\)",payload):
+        require(not payload[last:m.start()].strip(),"All native point-vector text must be accounted for.")
         words=m[1].split();require(len(words)==3 and all(re.fullmatch(FLOAT,w) and math.isfinite(float(w)) for w in words),"Every actual point must have three finite SI coordinates.")
         values.append(tuple(map(float,words)));last=m.end()
-    require(len(values)==int(match[1]) and not match[2][last:].strip(),"Every native point label must retain its complete vector.")
+    require(len(values)==int(match[1]) and not payload[last:].strip(),"Every native point label must retain its complete vector.")
     return values
 
 
@@ -105,13 +105,13 @@ def labels(raw,name):
 def face_vectors(raw,face_count,point_count):
     body=native.native_body(raw,"faces",{"faceList"});match=re.fullmatch(r"(\d+)\s*\((.*)\)\s*;?",body,re.S)
     require(match and int(match[1])==face_count,"Each current native face must have one owner label.")
-    faces=[];last=0
-    for m in re.finditer(r"(\d+)\s*\(([^()]*)\)",match[2]):
-        words=m[2].split();require(not match[2][last:m.start()].strip() and len(words)==int(m[1]) and 3<=len(words)<=64
+    faces=[];last=0;payload=match[2]
+    for m in re.finditer(r"(\d+)\s*\(([^()]*)\)",payload):
+        words=m[2].split();require(not payload[last:m.start()].strip() and len(words)==int(m[1]) and 3<=len(words)<=64
             and all(re.fullmatch(r"\d+",w) and int(w)<point_count for w in words),"Actual face order and distinct bounded point labels must remain complete.")
         ids=tuple(map(int,words));require(len(set(ids))==len(ids),"Native motion faces cannot repeat a point label.")
         faces.append(ids);last=m.end()
-    require(len(faces)==face_count and not match[2][last:].strip(),"Every native face must be accounted for.");return faces
+    require(len(faces)==face_count and not payload[last:].strip(),"Every native face must be accounted for.");return faces
 
 
 def boundary_pair(raw,internal_faces,face_count):

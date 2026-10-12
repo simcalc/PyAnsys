@@ -34,6 +34,9 @@ def source_fixture(root):
     prepared={"schemaVersion":case.reference_case.SCHEMA,"inletAbsoluteTotalPressurePa":300000.,"authoredInputFiles":rows,
         "declaredStudyInputs":study["input"],"physicalBasis":study["physicalBasis"],"sourceReference":study["sourceReference"],"defaultFacesPresent":False,
         "preservedNativeMeshFiles":[{**row,"path":row["path"].removeprefix("case/")} for row in mesh]}
+    prepared["outletProfileEvidence"]={"profile":deepcopy(case.reference_case.outlet.PROFILE),
+        "geometryReportFile":case.read(source,case.reference_runner.IDENTITY)[1],"nativeMeshFileRecords":deepcopy(mesh),
+        "fixtureKind":"SYNTHETIC-UPSTREAM-OUTLET-GEOMETRY-PROOF-ONLY"}
     (source/case.reference_case.REPORT).write_bytes(case.encoded(prepared))
     components=[{"component":name,"cellCount":2,"nodeCount":5} for name in ("impeller","volute")]
     def verify(directory):
@@ -58,6 +61,10 @@ class TrustedPressureRecipeTests(unittest.TestCase):
         self.assertIn(b"wallDist {method meshWave;}",point["system/fvSchemes"])
         self.assertNotIn(b"nonRotatingPatches",point["constant/MRFProperties"])
         self.assertNotIn("0/p",point);self.assertNotIn("constant/dynamicMeshDict",point)
+        self.assertEqual(high['0/U'],point['0/U'])
+        _,patches=case.reference_case.baseline_case.fields.boundary_blocks(point['0/U'],'U')
+        self.assertEqual(patches['mass-flow-inlet-11']['type'],'fixedValue')
+        self.assertNotIn(b'flowRateOutletVelocity',point['0/U'])
 
     def test_pressure_domain_is_explicit_positive_absolute_and_reference_bounded(self):
         for value in (True,None,math.nan,math.inf,0,2339,300001):
@@ -88,6 +95,22 @@ class TrustedPressureRecipeTests(unittest.TestCase):
 
 
 class PressurePreparationTests(unittest.TestCase):
+    def test_pressure_point_preserves_outlet_proof_and_cannot_change_its_velocity_family(self):
+        with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{"RUNNER_TEMP":temp}):
+            root=Path(temp);source,verify=source_fixture(root)
+            with patch.object(case,"verify_reference",side_effect=verify):
+                prepared=case.prepare(source,root/"point",pressure_absolute_pa=150000)
+                expected=case.reference_case.outlet.prefix_evidence(verify(source)["preparation"]["outletProfileEvidence"],"source-reference")
+                self.assertEqual(prepared["outletProfileEvidence"],expected)
+                altered=deepcopy(prepared);altered["outletProfileEvidence"]["profile"]["rectangleAreaM2"]*=2
+                (root/"point"/case.REPORT).write_bytes(case.encoded(altered))
+                with self.assertRaises(ValueError):case.verify_output(root/"point")
+                (root/"point"/case.REPORT).write_bytes(case.encoded(prepared))
+                path=root/"point/case/0/U";path.write_bytes(path.read_bytes().replace(case.reference_case.outlet.uniform_outlet_body(),b"type fixedValue; value uniform (1 10 0);"))
+                for row in prepared["authoredInputFiles"]:
+                    if row["path"]=="0/U":row.update(bytes=path.stat().st_size,sha256=sha256(path.read_bytes()).hexdigest())
+                with self.assertRaisesRegex(ValueError,"reconstruct independently"):case.family_rows(root/"point",prepared,{})
+
     def test_source_copy_and_actual_mesh_model_pressure_recipe_replay_without_solver(self):
         with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{"RUNNER_TEMP":temp}):
             root=Path(temp);source,verify=source_fixture(root)
