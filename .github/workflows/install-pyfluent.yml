@@ -28,13 +28,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Require the public standard GitHub runner
+        env:
+          PYANSYS_REPOSITORY_READ_TOKEN: ${{ github.token }}
         run: python3 -B tools/public_runner_guard.py
       - name: Set up CPython 3.12.10
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12.10'
       - name: Check isolation and evidence contracts
-        run: python -B -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/pyfluent-tests"
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -m pip check
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -B -m unittest discover -s tests -v
       - name: Download official SDK and required binary dependencies
         shell: bash
         run: |
@@ -48,6 +56,11 @@ jobs:
           "$RUNNER_TEMP/pyfluent-sdk/bin/python" -m pip install --no-index --find-links "$RUNNER_TEMP/pyfluent-wheels" -r requirements.txt
           "$RUNNER_TEMP/pyfluent-sdk/bin/python" -m pip check
           "$RUNNER_TEMP/pyfluent-sdk/bin/python" -B tools/verify_sdk.py --output "$RUNNER_TEMP/pyfluent-release/sdk-verification.json"
+      - name: Distinguish SDK installation from native Fluent and persistent hosting
+        run: >-
+          "$RUNNER_TEMP/pyfluent-sdk/bin/python" -B tools/verify_cloud_setup.py
+          --sdk-report "$RUNNER_TEMP/pyfluent-release/sdk-verification.json"
+          --output "$RUNNER_TEMP/pyfluent-cloud-preflight/cloud-readiness.json"
       - name: Build checksummed downloadable SDK bundle
         shell: bash
         run: |
@@ -59,3 +72,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -B tools/publish_release.py --directory "$RUNNER_TEMP/pyfluent-release"
+      - name: Publish fresh per-run SDK and runtime preflight evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python -B tools/publish_cloud_preflight.py
+          --sdk-report "$RUNNER_TEMP/pyfluent-release/sdk-verification.json"
+          --cloud-report "$RUNNER_TEMP/pyfluent-cloud-preflight/cloud-readiness.json"
