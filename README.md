@@ -61,6 +61,12 @@ The [official installation documentation](https://fluent.docs.pyansys.com/versio
 
 SDK version 0.42.2 matches the existing optional CFD adapter's declared pin. Successful installation here does not change that adapter's capability, license or physical-validation gates. The existing OpenFOAM learning benchmarks remain separate.
 
+### Fresh cloud setup verification
+
+The manual installation workflow now records native Fluent runtime presence after the actual SDK import and `pip check`. Its job summary separates SDK installation, native executable presence, license/session verification and persistent hosting. It does not launch Fluent, read license credentials, open a listener, create a tunnel or change billing.
+
+Each completed run publishes small checksum-bound `sdk-verification.json` and `cloud-readiness.json` files in a separate `pyfluent-cloud-preflight-<run-id>` release and verifies the downloaded bytes. Previous SDK bundle assets remain unchanged. A successful SDK job does not establish that the whole CFD application is online: the runner is temporary, native Fluent and a license remain separate, and [GitHub Pages is static hosting](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages). A production CFD application requires a dedicated worker under the relevant hosting and solver terms. GitHub Actions is used here for bounded [repository development/testing](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features#actions).
+
 ## Isolation and provenance
 
 Only authored setup, tests and documentation are tracked. Main application source, manufacturer data, study snapshots, database, secrets and credentials are excluded. The separate Frozen Rotor learning release below contains only the official Ansys educational example and meshes. The GitHub publication token exists only in release publishing steps and is not recorded in output. The top-level MIT license covers this repository's authored helpers; original downloaded wheels and educational files retain their upstream notices. Existing published release assets are preserved and rechecked; no claim of GitHub platform-enforced release immutability is made.
