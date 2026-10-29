@@ -36,7 +36,13 @@ jobs:
         with:
           python-version: '3.12.10'
       - name: Check isolation and evidence contracts
-        run: python -B -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/pyfluent-tests"
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -m pip install --only-binary=:all: --index-url https://pypi.org/simple h5py==3.16.0 numpy==2.5.4
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -m pip check
+          "$RUNNER_TEMP/pyfluent-tests/bin/python" -B -m unittest discover -s tests -v
       - name: Download official SDK and required binary dependencies
         shell: bash
         run: |
